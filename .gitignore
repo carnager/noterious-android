@@ -1,0 +1,13 @@
+.gradle/
+.kotlin/
+.idea/
+.gobuild/
+.gomodcache/
+local.properties
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.iml
+.DS_Store
