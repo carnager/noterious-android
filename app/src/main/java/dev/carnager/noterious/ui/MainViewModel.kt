@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 data class MainUiState(
@@ -97,7 +98,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val settings = settingsRepository.settings.first()
             if (settings.serverUrl.isBlank()) {
-                _uiState.update { it.copy(error = "Konfiguriere zuerst die Server-URL.") }
+                _uiState.update { it.copy(error = "Configure the server URL first.") }
                 return@launch
             }
             _uiState.update { it.copy(isLoading = true, error = null) }
@@ -125,7 +126,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 reloadOpenPageIfNeeded()
             }.onFailure { error ->
                 _uiState.update {
-                    it.copy(isLoading = false, error = error.message ?: "Sync fehlgeschlagen.")
+                    it.copy(isLoading = false, error = error.message ?: "Sync failed.")
                 }
             }
         }
@@ -250,7 +251,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
                 _uiState.update {
-                    it.copy(isPageLoading = false, error = error.message ?: "Seite konnte nicht geladen werden.")
+                    it.copy(isPageLoading = false, error = error.message ?: "Page could not be loaded.")
                 }
             }
         }
@@ -386,7 +387,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
                 _uiState.update {
-                    it.copy(isPageSaving = false, error = error.message ?: "Seite konnte nicht gespeichert werden.")
+                    it.copy(isPageSaving = false, error = error.message ?: "Page could not be saved.")
                 }
                 onResult(false)
             }
@@ -425,7 +426,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 onResult(document)
             }.onFailure { error ->
                 _uiState.update {
-                    it.copy(error = error.message ?: "Datei konnte nicht hochgeladen werden.")
+                    it.copy(error = error.message ?: "File could not be uploaded.")
                 }
                 onResult(null)
             }
@@ -518,7 +519,96 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
                 _uiState.update {
-                    it.copy(error = error.message ?: "Task konnte nicht aktualisiert werden.")
+                    it.copy(error = error.message ?: "Task could not be updated.")
+                }
+                onResult(false)
+            }
+        }
+    }
+
+    fun patchOpenPageFrontmatter(
+        set: Map<String, JsonElement> = emptyMap(),
+        remove: List<String> = emptyList(),
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        val pagePath = _uiState.value.openPagePath ?: run {
+            onResult(false)
+            return
+        }
+        val settings = _uiState.value.settings
+        if (settings.serverUrl.isBlank()) {
+            onResult(false)
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(error = null) }
+
+            runCatching {
+                val detail = repository.patchPageFrontmatter(
+                    url = settings.serverUrl,
+                    pagePath = pagePath,
+                    scopePrefix = settings.scopePrefix,
+                    bearerToken = settings.bearerToken,
+                    username = settings.username,
+                    password = settings.password,
+                    set = set,
+                    remove = remove,
+                )
+                val derived = runCatching {
+                    repository.fetchDerivedPage(
+                        url = settings.serverUrl,
+                        pagePath = pagePath,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }.getOrNull()
+                val pages = runCatching {
+                    repository.fetchPages(
+                        url = settings.serverUrl,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }.getOrNull()
+                val tasks = runCatching {
+                    repository.fetchTasks(
+                        url = settings.serverUrl,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }.getOrNull()
+                SavePageResult(
+                    rawMarkdown = detail.rawMarkdown,
+                    frontmatter = detail.frontmatter,
+                    pageTasks = detail.tasks,
+                    derived = derived,
+                    pages = pages,
+                    tasks = tasks,
+                    today = tasks?.let(repository::buildTodaySnapshot),
+                )
+            }.onSuccess { result ->
+                _uiState.update { current ->
+                    current.copy(
+                        openPageContent = if (current.openPagePath == pagePath) result.rawMarkdown else current.openPageContent,
+                        openPageFrontmatter = if (current.openPagePath == pagePath) result.frontmatter else current.openPageFrontmatter,
+                        openPageTasks = if (current.openPagePath == pagePath) result.pageTasks else current.openPageTasks,
+                        openPageDerived = if (current.openPagePath == pagePath) result.derived else current.openPageDerived,
+                        pages = result.pages ?: current.pages,
+                        tasks = result.tasks ?: current.tasks,
+                        today = result.today ?: current.today,
+                    )
+                }
+                onResult(true)
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                _uiState.update {
+                    it.copy(error = error.message ?: "Frontmatter could not be updated.")
                 }
                 onResult(false)
             }
@@ -565,7 +655,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
                 _uiState.update {
-                    it.copy(error = error.message ?: "Task konnte nicht aktualisiert werden.")
+                    it.copy(error = error.message ?: "Task could not be updated.")
                 }
                 onResult(false)
             }
@@ -602,7 +692,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
                 _uiState.update {
-                    it.copy(error = error.message ?: "Task konnte nicht geloescht werden.")
+                    it.copy(error = error.message ?: "Task could not be deleted.")
                 }
                 onResult(false)
             }
@@ -634,7 +724,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { results ->
                 _uiState.update { it.copy(searchResults = results, isSearching = false) }
             }.onFailure { error ->
-                _uiState.update { it.copy(isSearching = false, error = error.message ?: "Suche fehlgeschlagen.") }
+                if (error is CancellationException) return@onFailure
+                _uiState.update { it.copy(isSearching = false, error = error.message ?: "Search failed.") }
             }
         }
     }
@@ -758,7 +849,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val contentType = resolver.getType(uri).orEmpty()
         val content = resolver.openInputStream(uri)?.use { input ->
             input.readBytes()
-        } ?: throw IllegalStateException("Datei konnte nicht gelesen werden.")
+        } ?: throw IllegalStateException("File could not be read.")
         return UploadSpec(
             fileName = fileName,
             contentType = contentType,

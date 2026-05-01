@@ -64,12 +64,14 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Task
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -134,6 +136,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -141,6 +144,26 @@ import java.io.File
 import java.util.Locale
 
 private enum class Tab { Home, Browse, Tasks, Search, Settings }
+
+private enum class TaskListFilter(val label: String) {
+    Open("Open"),
+    Done("Done"),
+    All("All"),
+    WithDue("With due date"),
+    WithReminder("Reminder"),
+    Today("Today"),
+    Overdue("Overdue"),
+}
+
+private enum class FrontmatterKind(val label: String) {
+    Text("Text"),
+    List("List"),
+    Tags("Tags"),
+    Bool("Boolean"),
+    Date("Date"),
+    DateTime("Date & time"),
+    Notification("Notification"),
+}
 
 private sealed interface NotePreviewItem {
     data class MarkdownBlock(
@@ -194,11 +217,29 @@ private data class PendingBlockInsertAnchor(
     val placement: BlockInsertPlacement,
 )
 
+private data class FrontmatterEntry(
+    val key: String,
+    val value: kotlinx.serialization.json.JsonElement,
+    val kind: FrontmatterKind,
+)
+
+private data class FrontmatterDraftState(
+    val originalKey: String? = null,
+    val key: String = "",
+    val kind: FrontmatterKind = FrontmatterKind.Text,
+    val text: String = "",
+    val items: List<String> = emptyList(),
+    val pendingItem: String = "",
+    val boolValue: Boolean = false,
+)
+
 private data class ImageDownloadPayload(
     val bytes: ByteArray,
     val fileName: String,
     val mimeType: String,
 )
+
+private val rootFabContentBottomPadding = 104.dp
 
 private data class TaskResultCardModel(
     val ref: String,
@@ -218,6 +259,11 @@ private data class TaskResultCardModel(
 fun NoteriousApp(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var selectedTab by rememberSaveable { mutableStateOf(Tab.Home) }
+    var browseCurrentFolder by rememberSaveable { mutableStateOf("") }
+    var browseTagFilter by rememberSaveable { mutableStateOf("") }
+    var tasksFilterText by rememberSaveable { mutableStateOf("") }
+    var tasksQuickFilterName by rememberSaveable { mutableStateOf(TaskListFilter.Open.name) }
+    var searchText by rememberSaveable { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
     var showSlashMenu by remember { mutableStateOf(false) }
     var showCommandPalette by remember { mutableStateOf(false) }
@@ -301,6 +347,13 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     onResult = onResult,
                 )
             },
+            onPatchFrontmatter = { set, remove, onResult ->
+                viewModel.patchOpenPageFrontmatter(
+                    set = set,
+                    remove = remove,
+                    onResult = onResult,
+                )
+            },
             onUploadDocument = { uri, onResult ->
                 viewModel.uploadDocumentForOpenPage(uri, onResult)
             },
@@ -314,6 +367,10 @@ fun NoteriousApp(viewModel: MainViewModel) {
             viewModel.fetchVaults()
         }
         showScopePicker = true
+    }
+
+    val currentScopeLabel = remember(uiState.settings.scopePrefix, uiState.vaults) {
+        displayCurrentScopeLabel(uiState.settings.scopePrefix, uiState.vaults)
     }
 
     Scaffold(
@@ -333,7 +390,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                             horizontalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             Text(
-                                text = uiState.settings.scopePrefix.ifBlank { "All scopes" },
+                                text = currentScopeLabel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -389,7 +446,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     selected = selectedTab == Tab.Search,
                     onClick = { selectedTab = Tab.Search },
                     icon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    label = { Text("Suche") },
+                    label = { Text("Search") },
                 )
                 NavigationBarItem(
                     selected = selectedTab == Tab.Settings,
@@ -405,7 +462,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                 shape = CircleShape,
                 containerColor = MaterialTheme.colorScheme.primary,
             ) {
-                Icon(Icons.Default.Menu, contentDescription = "Menue", tint = MaterialTheme.colorScheme.onPrimary)
+                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.onPrimary)
             }
         },
     ) { innerPadding ->
@@ -445,11 +502,19 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     Tab.Browse -> BrowseScreen(
                         pages = uiState.pages,
                         scopePrefix = uiState.settings.scopePrefix,
+                        currentFolder = browseCurrentFolder,
+                        selectedTag = browseTagFilter,
+                        onCurrentFolderChange = { browseCurrentFolder = it },
+                        onSelectedTagChange = { browseTagFilter = it },
                         onOpenPage = { viewModel.openPage(it) },
                     )
                     Tab.Tasks -> TasksScreen(
                         tasks = uiState.tasks,
                         scopePrefix = uiState.settings.scopePrefix,
+                        filterText = tasksFilterText,
+                        taskFilter = runCatching { TaskListFilter.valueOf(tasksQuickFilterName) }.getOrDefault(TaskListFilter.All),
+                        onFilterTextChange = { tasksFilterText = it },
+                        onTaskFilterChange = { tasksQuickFilterName = it.name },
                         onOpenPage = { viewModel.openPage(it) },
                         onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
                             viewModel.patchTask(
@@ -469,8 +534,19 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     Tab.Search -> SearchScreen(
                         uiState = uiState,
                         scopePrefix = uiState.settings.scopePrefix,
-                        onSearch = { viewModel.search(it) },
-                        onClear = { viewModel.clearSearch() },
+                        searchText = searchText,
+                        onSearchTextChange = {
+                            searchText = it
+                            if (it.isBlank()) {
+                                viewModel.clearSearch()
+                            } else {
+                                viewModel.search(it)
+                            }
+                        },
+                        onClear = {
+                            searchText = ""
+                            viewModel.clearSearch()
+                        },
                         onOpenPage = { viewModel.openPage(it) },
                         onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
                             viewModel.patchTask(
@@ -537,7 +613,7 @@ private fun ScopePickerSheet(
     }
     val selectableVaults = remember(vaults) {
         vaults
-            .sortedBy { vault -> vault.name.lowercase() }
+            .sortedBy { vault -> displayScopeName(vault).lowercase() }
     }
 
     ModalBottomSheet(
@@ -578,8 +654,8 @@ private fun ScopePickerSheet(
             } else {
                 selectableVaults.forEach { vault ->
                     ScopePickerItem(
-                        title = vault.name.ifBlank { vault.key.ifBlank { vault.vaultPath } },
-                        subtitle = vault.key.takeIf { it.isNotBlank() && it != vault.name } ?: vault.vaultPath,
+                        title = displayScopeName(vault),
+                        subtitle = null,
                         selected = normalizedCurrentScope == scopePrefixForVault(vault),
                         onClick = { onSelectVault(vault) },
                     )
@@ -717,12 +793,12 @@ private fun CommandPaletteSheet(
                 value = query,
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Seite oeffnen...") },
+                placeholder = { Text("Open page...") },
                 singleLine = true,
                 trailingIcon = {
                     if (query.isNotEmpty()) {
                         IconButton(onClick = { query = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Leeren")
+                            Icon(Icons.Default.Close, contentDescription = "Clear")
                         }
                     }
                 },
@@ -791,6 +867,7 @@ private fun PageViewerScreen(
     onSavePage: (String, String, (Boolean) -> Unit) -> Unit,
     onShowGlobalMenu: () -> Unit,
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
+    onPatchFrontmatter: (set: Map<String, kotlinx.serialization.json.JsonElement>, remove: List<String>, onResult: (Boolean) -> Unit) -> Unit,
     onUploadDocument: (Uri, (DocumentRecord?) -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
@@ -808,6 +885,10 @@ private fun PageViewerScreen(
         ?.content
         ?.takeIf(String::isNotBlank)
         ?: pageTitleFromPath(displayPath)
+    val visibleFrontmatterEntries = remember(frontmatter) { frontmatterVisibleEntries(frontmatter) }
+    val visibleFrontmatterByKey = remember(visibleFrontmatterEntries) {
+        visibleFrontmatterEntries.associateBy(FrontmatterEntry::key)
+    }
 
     var editorMode by rememberSaveable(pagePath) { mutableStateOf(NoteEditorMode.Preview) }
     var draftMarkdown by rememberSaveable(pagePath) { mutableStateOf(content.orEmpty()) }
@@ -827,6 +908,9 @@ private fun PageViewerScreen(
     var pendingBlockInsertAnchor by remember(pagePath) { mutableStateOf<PendingBlockInsertAnchor?>(null) }
     var imageActionTarget by remember(pagePath) { mutableStateOf<MarkdownImageTarget?>(null) }
     var pendingImageSaveTarget by remember(pagePath) { mutableStateOf<MarkdownImageTarget?>(null) }
+    var isFrontmatterSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var frontmatterDraftState by remember(pagePath) { mutableStateOf<FrontmatterDraftState?>(null) }
+    var isPatchingFrontmatter by rememberSaveable(pagePath) { mutableStateOf(false) }
 
     LaunchedEffect(error) {
         error?.let { message ->
@@ -949,6 +1033,83 @@ private fun PageViewerScreen(
         taskTextEditorState = null
         taskScheduleEditorState = null
         editorMode = NoteEditorMode.Preview
+    }
+
+    fun openFrontmatterSheet() {
+        if (editorMode != NoteEditorMode.Preview || currentMarkdownDraft() != baseMarkdown) {
+            return
+        }
+        imageActionTarget = null
+        blockActionMenuState = null
+        tableEditorState = null
+        textBlockEditorState = null
+        taskTextEditorState = null
+        taskScheduleEditorState = null
+        frontmatterDraftState = null
+        isFrontmatterSheetVisible = true
+    }
+
+    fun dismissFrontmatterSheet() {
+        if (isPatchingFrontmatter) {
+            return
+        }
+        frontmatterDraftState = null
+        isFrontmatterSheetVisible = false
+    }
+
+    fun startFrontmatterAdd() {
+        frontmatterDraftState = frontmatterDraftStateForEntry()
+    }
+
+    fun startFrontmatterEdit(entry: FrontmatterEntry) {
+        frontmatterDraftState = frontmatterDraftStateForEntry(entry)
+    }
+
+    fun deleteFrontmatterProperty(key: String) {
+        if (key.isBlank() || isPatchingFrontmatter) {
+            return
+        }
+        isPatchingFrontmatter = true
+        onPatchFrontmatter(emptyMap(), listOf(key)) { success ->
+            isPatchingFrontmatter = false
+            if (success && frontmatterDraftState?.originalKey == key) {
+                frontmatterDraftState = null
+            }
+        }
+    }
+
+    fun saveFrontmatterDraft() {
+        val draft = frontmatterDraftState ?: return
+        val key = draft.key.trim()
+        if (key.isBlank()) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("Frontmatter key is required.")
+            }
+            return
+        }
+        if (isTemplateMetadataKey(key)) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("Template metadata keys are reserved.")
+            }
+            return
+        }
+
+        val originalEntry = draft.originalKey?.let(visibleFrontmatterByKey::get)
+        val setPayload = mapOf(key to frontmatterDraftJsonElement(draft, originalEntry?.value))
+        val removePayload = buildList {
+            val originalKey = draft.originalKey
+            if (!originalKey.isNullOrBlank() && originalKey != key) {
+                add(originalKey)
+            }
+        }
+
+        isPatchingFrontmatter = true
+        onPatchFrontmatter(setPayload, removePayload) { success ->
+            isPatchingFrontmatter = false
+            if (success) {
+                frontmatterDraftState = null
+            }
+        }
     }
 
     fun normalizeTableBlock(table: NoteEditorBlock.Table): NoteEditorBlock.Table {
@@ -1297,6 +1458,8 @@ private fun PageViewerScreen(
     fun handleNoteBack() {
         val hasUnsavedDraft = currentMarkdownDraft() != baseMarkdown
         when {
+            frontmatterDraftState != null -> frontmatterDraftState = null
+            isFrontmatterSheetVisible -> dismissFrontmatterSheet()
             blockActionMenuState != null -> blockActionMenuState = null
             imageActionTarget != null -> imageActionTarget = null
             textBlockEditorState != null -> textBlockEditorState = null
@@ -1378,7 +1541,7 @@ private fun PageViewerScreen(
                 shape = CircleShape,
                 containerColor = MaterialTheme.colorScheme.primary,
             ) {
-                Icon(Icons.Default.Menu, contentDescription = "Menue", tint = MaterialTheme.colorScheme.onPrimary)
+                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.onPrimary)
             }
         },
         topBar = {
@@ -1392,7 +1555,7 @@ private fun PageViewerScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = ::handleNoteBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurueck")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
@@ -1457,6 +1620,12 @@ private fun PageViewerScreen(
                             }
                         }
                         else -> {
+                            IconButton(
+                                onClick = { openFrontmatterSheet() },
+                                enabled = !isSaving && content != null,
+                            ) {
+                                Icon(Icons.Default.Tune, contentDescription = "Frontmatter")
+                            }
                             TextButton(
                                 onClick = { enterEditMode() },
                                 enabled = content != null || draftMarkdown.isNotBlank(),
@@ -1532,10 +1701,10 @@ private fun PageViewerScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
-                    if (!isDirty && frontmatter != null && frontmatter.isNotEmpty()) {
+                    if (!isDirty && visibleFrontmatterEntries.isNotEmpty()) {
                         Spacer(Modifier.height(8.dp))
                         FrontmatterPanel(
-                            frontmatter = frontmatter,
+                            entries = visibleFrontmatterEntries,
                             scopePrefix = settings.scopePrefix,
                             onOpenPage = onOpenPage,
                         )
@@ -1762,6 +1931,21 @@ private fun PageViewerScreen(
                     click = clickValue,
                 )
             },
+        )
+    }
+
+    if (isFrontmatterSheetVisible) {
+        FrontmatterEditorSheet(
+            entries = visibleFrontmatterEntries,
+            draft = frontmatterDraftState,
+            isSaving = isPatchingFrontmatter,
+            onDismiss = { dismissFrontmatterSheet() },
+            onAddProperty = { startFrontmatterAdd() },
+            onEditProperty = ::startFrontmatterEdit,
+            onDeleteProperty = ::deleteFrontmatterProperty,
+            onDraftChange = { frontmatterDraftState = it },
+            onDismissDraft = { frontmatterDraftState = null },
+            onSaveDraft = { saveFrontmatterDraft() },
         )
     }
 
@@ -3405,10 +3589,330 @@ private fun replaceSelectionWithSnippet(
 
 // ─── Frontmatter Panel ──────────────────────────────────────────────────
 
+private val templateMetadataKeys = setOf(
+    "_template",
+    "_template_label",
+    "_template_folder",
+    "_template_list",
+    "_template_tags",
+    "_template_bool",
+    "_template_date",
+    "_template_datetime",
+    "_template_notification",
+)
+
+private val frontmatterDateTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+
+private fun isTemplateMetadataKey(key: String): Boolean {
+    return templateMetadataKeys.contains(key.trim())
+}
+
+private fun isTagPropertyKey(key: String?): Boolean {
+    return key?.trim()?.equals("tags", ignoreCase = true) == true
+}
+
+private fun isNotificationClickKey(key: String?): Boolean {
+    val normalized = key.orEmpty().trim().lowercase()
+    return normalized == "click" || normalized.endsWith("_click") || normalized.endsWith("-click")
+}
+
+private fun isNotificationPropertyKey(key: String?): Boolean {
+    val normalized = key.orEmpty().trim().lowercase()
+    if (normalized.isBlank() || isNotificationClickKey(normalized)) {
+        return false
+    }
+    return normalized == "notification" ||
+        normalized == "notify" ||
+        normalized == "remind" ||
+        normalized == "reminder" ||
+        Regex("(^|[_-])(notify|notification|remind|reminder)([_-]|$)", RegexOption.IGNORE_CASE).containsMatchIn(normalized)
+}
+
+private fun frontmatterKindHints(frontmatter: JsonObject?): Map<String, FrontmatterKind> {
+    val source = frontmatter ?: return emptyMap()
+    val hints = mutableMapOf<String, FrontmatterKind>()
+
+    fun register(metadataKey: String, kind: FrontmatterKind) {
+        jsonElementStringValues(source[metadataKey]).forEach { key ->
+            val normalizedKey = key.trim()
+            if (normalizedKey.isNotBlank()) {
+                hints.putIfAbsent(normalizedKey, kind)
+            }
+        }
+    }
+
+    register("_template_list", FrontmatterKind.List)
+    register("_template_tags", FrontmatterKind.Tags)
+    register("_template_bool", FrontmatterKind.Bool)
+    register("_template_date", FrontmatterKind.Date)
+    register("_template_datetime", FrontmatterKind.DateTime)
+    register("_template_notification", FrontmatterKind.Notification)
+    return hints
+}
+
+private fun inferFrontmatterKind(
+    value: kotlinx.serialization.json.JsonElement?,
+    key: String? = null,
+    hintedKind: FrontmatterKind? = null,
+): FrontmatterKind {
+    if (value is JsonArray) {
+        return if (hintedKind == FrontmatterKind.Tags || isTagPropertyKey(key)) {
+            FrontmatterKind.Tags
+        } else {
+            FrontmatterKind.List
+        }
+    }
+
+    val primitive = value as? JsonPrimitive
+    if (primitive?.booleanOrNull != null) {
+        return FrontmatterKind.Bool
+    }
+
+    val textValue = frontmatterEditableText(value).trim()
+    if (Regex("^\\d{4}-\\d{2}-\\d{2}$").matches(textValue)) {
+        return if (hintedKind == FrontmatterKind.Notification || isNotificationPropertyKey(key)) {
+            FrontmatterKind.Notification
+        } else {
+            FrontmatterKind.Date
+        }
+    }
+    if (Regex("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}").containsMatchIn(textValue)) {
+        return if (hintedKind == FrontmatterKind.Notification || isNotificationPropertyKey(key)) {
+            FrontmatterKind.Notification
+        } else {
+            FrontmatterKind.DateTime
+        }
+    }
+    if (textValue.isBlank() && hintedKind != null) {
+        return hintedKind
+    }
+    if (textValue.isBlank() && isNotificationPropertyKey(key)) {
+        return FrontmatterKind.Notification
+    }
+    if (textValue.isBlank() && isTagPropertyKey(key)) {
+        return FrontmatterKind.Tags
+    }
+    return FrontmatterKind.Text
+}
+
+private fun frontmatterVisibleEntries(frontmatter: JsonObject?): List<FrontmatterEntry> {
+    val source = frontmatter ?: return emptyList()
+    val kindHints = frontmatterKindHints(source)
+    return source.entries
+        .filterNot { (key, value) -> isTemplateMetadataKey(key) || value is JsonNull }
+        .sortedBy { it.key.lowercase() }
+        .map { (key, value) ->
+            FrontmatterEntry(
+                key = key,
+                value = value,
+                kind = inferFrontmatterKind(value, key, kindHints[key]),
+            )
+        }
+}
+
+private fun jsonElementStringValues(value: kotlinx.serialization.json.JsonElement?): List<String> {
+    return when (value) {
+        is JsonArray -> value.mapNotNull { (it as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotBlank) }
+        is JsonPrimitive -> listOf(value.content.trim()).filter(String::isNotBlank)
+        else -> emptyList()
+    }
+}
+
+private fun normalizeTagEntry(value: String): String {
+    return value.trim().replace(Regex("^#+"), "")
+}
+
+private fun sequenceInputEntries(kind: FrontmatterKind, value: String): List<String> {
+    return value
+        .split(',', '\n')
+        .map { entry ->
+            if (kind == FrontmatterKind.Tags) {
+                normalizeTagEntry(entry)
+            } else {
+                entry.trim()
+            }
+        }
+        .filter(String::isNotBlank)
+}
+
+private fun frontmatterEditableText(element: kotlinx.serialization.json.JsonElement?): String {
+    return when (element) {
+        null, is JsonNull -> ""
+        is JsonPrimitive -> element.content
+        is JsonArray -> element.mapNotNull { (it as? JsonPrimitive)?.content }.joinToString(", ")
+        is JsonObject -> element.toString()
+    }
+}
+
+private fun parseFrontmatterDateValue(raw: String?): LocalDate? {
+    val value = raw.orEmpty().trim()
+    if (value.isBlank()) {
+        return null
+    }
+    return runCatching { LocalDate.parse(value.take(10)) }.getOrNull()
+}
+
+private fun parseFrontmatterDateTimeValue(raw: String?): LocalDateTime? {
+    val value = raw.orEmpty().trim().replace('T', ' ')
+    if (value.isBlank()) {
+        return null
+    }
+    return runCatching {
+        LocalDateTime.parse(value.take(16), frontmatterDateTimeFormatter)
+    }.getOrNull()
+}
+
+private fun serializeFrontmatterDateTimeValue(raw: String?): String {
+    val value = raw.orEmpty().trim()
+    if (value.isBlank()) {
+        return ""
+    }
+    return parseFrontmatterDateTimeValue(value)
+        ?.format(frontmatterDateTimeFormatter)
+        ?: value.replace('T', ' ').take(16)
+}
+
+private fun formatFrontmatterDateValue(raw: String): String {
+    val date = parseFrontmatterDateValue(raw) ?: return raw
+    return runCatching {
+        date.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM))
+    }.getOrDefault(raw)
+}
+
+private fun formatFrontmatterDateTimeValue(raw: String): String {
+    val dateTime = parseFrontmatterDateTimeValue(raw) ?: return raw
+    return runCatching {
+        dateTime.format(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT))
+    }.getOrDefault(raw)
+}
+
+private fun frontmatterPreviewText(entry: FrontmatterEntry): String {
+    return when (entry.kind) {
+        FrontmatterKind.Tags -> jsonElementStringValues(entry.value)
+            .map(::normalizeTagEntry)
+            .joinToString(" ") { "#$it" }
+        FrontmatterKind.List -> jsonElementStringValues(entry.value).joinToString(", ")
+        FrontmatterKind.Bool -> if ((entry.value as? JsonPrimitive)?.booleanOrNull == true) "True" else "False"
+        FrontmatterKind.Date -> formatFrontmatterDateValue(frontmatterEditableText(entry.value))
+        FrontmatterKind.DateTime,
+        FrontmatterKind.Notification,
+        -> formatFrontmatterDateTimeValue(frontmatterEditableText(entry.value))
+        FrontmatterKind.Text -> frontmatterEditableText(entry.value)
+    }
+}
+
+private fun defaultFrontmatterKeyForKind(key: String, kind: FrontmatterKind): String {
+    if (key.isNotBlank()) {
+        return key
+    }
+    return when (kind) {
+        FrontmatterKind.Tags -> "tags"
+        FrontmatterKind.Notification -> "notification"
+        else -> ""
+    }
+}
+
+private fun frontmatterDraftStateForEntry(
+    entry: FrontmatterEntry? = null,
+    forcedKind: FrontmatterKind? = null,
+): FrontmatterDraftState {
+    val kind = forcedKind ?: entry?.kind ?: FrontmatterKind.Text
+    val key = defaultFrontmatterKeyForKind(entry?.key.orEmpty(), kind)
+    val value = entry?.value
+    return when (kind) {
+        FrontmatterKind.List -> FrontmatterDraftState(
+            originalKey = entry?.key,
+            key = key,
+            kind = kind,
+            items = jsonElementStringValues(value),
+        )
+        FrontmatterKind.Tags -> FrontmatterDraftState(
+            originalKey = entry?.key,
+            key = key,
+            kind = kind,
+            items = jsonElementStringValues(value).map(::normalizeTagEntry),
+        )
+        FrontmatterKind.Bool -> FrontmatterDraftState(
+            originalKey = entry?.key,
+            key = key,
+            kind = kind,
+            boolValue = (value as? JsonPrimitive)?.booleanOrNull == true,
+        )
+        FrontmatterKind.Date -> FrontmatterDraftState(
+            originalKey = entry?.key,
+            key = key,
+            kind = kind,
+            text = parseFrontmatterDateValue(frontmatterEditableText(value))?.toString().orEmpty(),
+        )
+        FrontmatterKind.DateTime,
+        FrontmatterKind.Notification,
+        -> FrontmatterDraftState(
+            originalKey = entry?.key,
+            key = key,
+            kind = kind,
+            text = serializeFrontmatterDateTimeValue(frontmatterEditableText(value)),
+        )
+        FrontmatterKind.Text -> FrontmatterDraftState(
+            originalKey = entry?.key,
+            key = key,
+            kind = kind,
+            text = frontmatterEditableText(value),
+        )
+    }
+}
+
+private fun coerceFrontmatterTextPrimitive(
+    text: String,
+    originalValue: kotlinx.serialization.json.JsonElement? = null,
+): JsonPrimitive {
+    val trimmed = text.trim()
+    val primitive = originalValue as? JsonPrimitive
+    if (primitive != null && !primitive.isString) {
+        primitive.booleanOrNull?.let {
+            return JsonPrimitive(trimmed.equals("true", ignoreCase = true))
+        }
+        trimmed.toLongOrNull()?.let { return JsonPrimitive(it) }
+        trimmed.toDoubleOrNull()?.let { return JsonPrimitive(it) }
+    }
+    return JsonPrimitive(trimmed)
+}
+
+private fun frontmatterDraftJsonElement(
+    draft: FrontmatterDraftState,
+    originalValue: kotlinx.serialization.json.JsonElement? = null,
+): kotlinx.serialization.json.JsonElement {
+    return when (draft.kind) {
+        FrontmatterKind.List -> JsonArray(draft.items.map { JsonPrimitive(it.trim()) })
+        FrontmatterKind.Tags -> JsonArray(draft.items.map { JsonPrimitive(normalizeTagEntry(it)) })
+        FrontmatterKind.Bool -> JsonPrimitive(draft.boolValue)
+        FrontmatterKind.Date -> JsonPrimitive(draft.text.trim().take(10))
+        FrontmatterKind.DateTime,
+        FrontmatterKind.Notification,
+        -> JsonPrimitive(serializeFrontmatterDateTimeValue(draft.text))
+        FrontmatterKind.Text -> coerceFrontmatterTextPrimitive(draft.text, originalValue)
+    }
+}
+
+private fun applyFrontmatterDraftKind(
+    draft: FrontmatterDraftState,
+    kind: FrontmatterKind,
+    originalValue: kotlinx.serialization.json.JsonElement? = null,
+): FrontmatterDraftState {
+    val coercedValue = frontmatterDraftJsonElement(draft, originalValue)
+    return frontmatterDraftStateForEntry(
+        entry = FrontmatterEntry(
+            key = defaultFrontmatterKeyForKind(draft.key, kind),
+            value = coercedValue,
+            kind = kind,
+        ),
+        forcedKind = kind,
+    ).copy(originalKey = draft.originalKey)
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FrontmatterPanel(
-    frontmatter: JsonObject,
+    entries: List<FrontmatterEntry>,
     scopePrefix: String,
     onOpenPage: (String) -> Unit,
 ) {
@@ -3422,9 +3926,11 @@ private fun FrontmatterPanel(
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            frontmatter.entries.forEach { (key, value) ->
+            entries.forEach { entry ->
+                val key = entry.key
+                val value = entry.value
                 when {
-                    key == "tags" && value is JsonArray -> {
+                    entry.kind == FrontmatterKind.Tags -> {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -3436,19 +3942,18 @@ private fun FrontmatterPanel(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                value.forEach { tag ->
-                                    val tagText = tag.jsonPrimitiveOrNull()?.content ?: return@forEach
+                                jsonElementStringValues(value).map(::normalizeTagEntry).forEach { tagText ->
                                     AssistChip(
                                         onClick = { },
                                         label = {
-                                            Text(tagText, style = MaterialTheme.typography.labelSmall)
+                                            Text("#$tagText", style = MaterialTheme.typography.labelSmall)
                                         },
                                     )
                                 }
                             }
                         }
                     }
-                    value is JsonArray -> {
+                    entry.kind == FrontmatterKind.List && value is JsonArray -> {
                         Text(
                             "$key:",
                             style = MaterialTheme.typography.labelMedium,
@@ -3456,7 +3961,7 @@ private fun FrontmatterPanel(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         value.forEach { item ->
-                            val itemText = jsonElementDisplayValue(item)
+                            val itemText = frontmatterEditableText(item)
                             if (itemText.isNotBlank()) {
                                 Row(
                                     modifier = Modifier.padding(start = 12.dp),
@@ -3478,7 +3983,7 @@ private fun FrontmatterPanel(
                         }
                     }
                     else -> {
-                        val displayValue = jsonElementDisplayValue(value)
+                        val displayValue = frontmatterPreviewText(entry)
                         if (displayValue.isNotBlank()) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
@@ -3504,6 +4009,499 @@ private fun FrontmatterPanel(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun FrontmatterEditorSheet(
+    entries: List<FrontmatterEntry>,
+    draft: FrontmatterDraftState?,
+    isSaving: Boolean,
+    onDismiss: () -> Unit,
+    onAddProperty: () -> Unit,
+    onEditProperty: (FrontmatterEntry) -> Unit,
+    onDeleteProperty: (String) -> Unit,
+    onDraftChange: (FrontmatterDraftState) -> Unit,
+    onDismissDraft: () -> Unit,
+    onSaveDraft: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "Frontmatter",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = if (draft == null) {
+                            if (entries.isEmpty()) {
+                                "Add note properties without opening raw YAML."
+                            } else {
+                                "Tap a property to edit it."
+                            }
+                        } else {
+                            "Edit structured properties instead of raw YAML."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (draft == null) {
+                    Button(
+                        onClick = onAddProperty,
+                        enabled = !isSaving,
+                    ) {
+                        Text("Add")
+                    }
+                }
+            }
+            if (draft == null) {
+                if (entries.isEmpty()) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = "No frontmatter on this page.",
+                            modifier = Modifier.padding(16.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        ),
+                        shape = RoundedCornerShape(18.dp),
+                    ) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            entries.forEachIndexed { index, entry ->
+                                FrontmatterPropertyRow(
+                                    entry = entry,
+                                    isSaving = isSaving,
+                                    onEdit = onEditProperty,
+                                    onDelete = onDeleteProperty,
+                                )
+                                if (index != entries.lastIndex) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(start = 14.dp),
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                val originalEntry = draft.originalKey?.let { key ->
+                    entries.firstOrNull { it.key == key }
+                }
+                FrontmatterDraftEditor(
+                    draft = draft,
+                    originalValue = originalEntry?.value,
+                    isSaving = isSaving,
+                    onDraftChange = onDraftChange,
+                    onDelete = draft.originalKey?.let { key -> { onDeleteProperty(key) } },
+                    onDismiss = onDismissDraft,
+                    onSave = onSaveDraft,
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun FrontmatterPropertyRow(
+    entry: FrontmatterEntry,
+    isSaving: Boolean,
+    onEdit: (FrontmatterEntry) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    val preview = frontmatterPreviewText(entry)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = !isSaving) { onEdit(entry) }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = entry.key,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                FrontmatterKindBadge(entry.kind.label)
+            }
+            Text(
+                text = preview.ifBlank { "Empty" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (preview.isBlank()) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        IconButton(
+            onClick = { onDelete(entry.key) },
+            enabled = !isSaving,
+        ) {
+            Icon(Icons.Default.Close, contentDescription = "Delete ${entry.key}")
+        }
+    }
+}
+
+@Composable
+private fun FrontmatterKindBadge(label: String) {
+    Box(
+        modifier = Modifier
+            .background(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(999.dp),
+            )
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FrontmatterDraftEditor(
+    draft: FrontmatterDraftState,
+    originalValue: kotlinx.serialization.json.JsonElement?,
+    isSaving: Boolean,
+    onDraftChange: (FrontmatterDraftState) -> Unit,
+    onDelete: (() -> Unit)?,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+) {
+    val context = LocalContext.current
+
+    fun commitPendingItems() {
+        val nextEntries = sequenceInputEntries(draft.kind, draft.pendingItem)
+        if (nextEntries.isEmpty()) {
+            return
+        }
+        onDraftChange(
+            draft.copy(
+                items = (draft.items + nextEntries).distinct(),
+                pendingItem = "",
+            ),
+        )
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            text = if (draft.originalKey == null) "Add property" else "Edit property",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+
+        OutlinedTextField(
+            value = draft.key,
+            onValueChange = { onDraftChange(draft.copy(key = it)) },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Key") },
+            singleLine = true,
+            enabled = !isSaving,
+        )
+
+        Text(
+            text = "Type",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            FrontmatterKind.entries.forEach { kind ->
+                FilterChip(
+                    selected = draft.kind == kind,
+                    onClick = {
+                        onDraftChange(applyFrontmatterDraftKind(draft, kind, originalValue))
+                    },
+                    enabled = !isSaving,
+                    label = { Text(kind.label) },
+                )
+            }
+        }
+
+        when (draft.kind) {
+            FrontmatterKind.Text -> {
+                OutlinedTextField(
+                    value = draft.text,
+                    onValueChange = { onDraftChange(draft.copy(text = it)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Value") },
+                    enabled = !isSaving,
+                )
+            }
+            FrontmatterKind.Bool -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    FilterChip(
+                        selected = draft.boolValue,
+                        onClick = { onDraftChange(draft.copy(boolValue = true)) },
+                        enabled = !isSaving,
+                        label = { Text("True") },
+                    )
+                    FilterChip(
+                        selected = !draft.boolValue,
+                        onClick = { onDraftChange(draft.copy(boolValue = false)) },
+                        enabled = !isSaving,
+                        label = { Text("False") },
+                    )
+                }
+            }
+            FrontmatterKind.List,
+            FrontmatterKind.Tags,
+            -> {
+                if (draft.items.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        draft.items.forEachIndexed { index, item ->
+                            AssistChip(
+                                onClick = {
+                                    onDraftChange(
+                                        draft.copy(
+                                            items = draft.items.filterIndexed { itemIndex, _ -> itemIndex != index },
+                                        ),
+                                    )
+                                },
+                                label = {
+                                    Text(if (draft.kind == FrontmatterKind.Tags) "#$item" else item)
+                                },
+                                enabled = !isSaving,
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Tap an item to remove it.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = draft.pendingItem,
+                        onValueChange = { onDraftChange(draft.copy(pendingItem = it)) },
+                        modifier = Modifier.weight(1f),
+                        label = { Text(if (draft.kind == FrontmatterKind.Tags) "Tag" else "Item") },
+                        placeholder = { Text(if (draft.kind == FrontmatterKind.Tags) "Add tag" else "Add item") },
+                        singleLine = true,
+                        enabled = !isSaving,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { commitPendingItems() }),
+                    )
+                    Button(
+                        onClick = { commitPendingItems() },
+                        enabled = !isSaving && draft.pendingItem.isNotBlank(),
+                    ) {
+                        Text("Add")
+                    }
+                }
+            }
+            FrontmatterKind.Date -> {
+                OutlinedTextField(
+                    value = draft.text.takeIf(String::isNotBlank)?.let(::formatFrontmatterDateValue).orEmpty(),
+                    onValueChange = {},
+                    modifier = Modifier.fillMaxWidth(),
+                    readOnly = true,
+                    label = { Text("Value") },
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(
+                        onClick = {
+                            val initialDate = parseFrontmatterDateValue(draft.text) ?: LocalDate.now()
+                            DatePickerDialog(
+                                context,
+                                { _, year, month, dayOfMonth ->
+                                    onDraftChange(
+                                        draft.copy(
+                                            text = LocalDate.of(year, month + 1, dayOfMonth).toString(),
+                                        ),
+                                    )
+                                },
+                                initialDate.year,
+                                initialDate.monthValue - 1,
+                                initialDate.dayOfMonth,
+                            ).show()
+                        },
+                        enabled = !isSaving,
+                    ) {
+                        Text("Pick date")
+                    }
+                    if (draft.text.isNotBlank()) {
+                        TextButton(
+                            onClick = { onDraftChange(draft.copy(text = "")) },
+                            enabled = !isSaving,
+                        ) {
+                            Text("Clear")
+                        }
+                    }
+                }
+            }
+            FrontmatterKind.DateTime,
+            FrontmatterKind.Notification,
+            -> {
+                OutlinedTextField(
+                    value = draft.text.takeIf(String::isNotBlank)?.let(::formatFrontmatterDateTimeValue).orEmpty(),
+                    onValueChange = {},
+                    modifier = Modifier.fillMaxWidth(),
+                    readOnly = true,
+                    label = { Text("Value") },
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(
+                        onClick = {
+                            val initialDateTime = parseFrontmatterDateTimeValue(draft.text)
+                                ?: LocalDateTime.of(LocalDate.now(), LocalTime.of(9, 0))
+                            DatePickerDialog(
+                                context,
+                                { _, year, month, dayOfMonth ->
+                                    val nextDate = LocalDate.of(year, month + 1, dayOfMonth)
+                                    val nextDateTime = LocalDateTime.of(nextDate, initialDateTime.toLocalTime())
+                                    onDraftChange(
+                                        draft.copy(
+                                            text = nextDateTime.format(frontmatterDateTimeFormatter),
+                                        ),
+                                    )
+                                },
+                                initialDateTime.year,
+                                initialDateTime.monthValue - 1,
+                                initialDateTime.dayOfMonth,
+                            ).show()
+                        },
+                        enabled = !isSaving,
+                    ) {
+                        Text("Pick date")
+                    }
+                    Button(
+                        onClick = {
+                            val initialDateTime = parseFrontmatterDateTimeValue(draft.text)
+                                ?: LocalDateTime.of(LocalDate.now(), LocalTime.of(9, 0))
+                            TimePickerDialog(
+                                context,
+                                { _, hourOfDay, minute ->
+                                    val nextTime = LocalTime.of(hourOfDay, minute)
+                                    val nextDateTime = LocalDateTime.of(initialDateTime.toLocalDate(), nextTime)
+                                    onDraftChange(
+                                        draft.copy(
+                                            text = nextDateTime.format(frontmatterDateTimeFormatter),
+                                        ),
+                                    )
+                                },
+                                initialDateTime.hour,
+                                initialDateTime.minute,
+                                DateFormat.is24HourFormat(context),
+                            ).show()
+                        },
+                        enabled = !isSaving,
+                    ) {
+                        Text("Pick time")
+                    }
+                    if (draft.text.isNotBlank()) {
+                        TextButton(
+                            onClick = { onDraftChange(draft.copy(text = "")) },
+                            enabled = !isSaving,
+                        ) {
+                            Text("Clear")
+                        }
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onDismiss, enabled = !isSaving) {
+                Text("Back")
+            }
+            if (onDelete != null) {
+                TextButton(onClick = onDelete, enabled = !isSaving) {
+                    Text("Delete")
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Button(onClick = onSave, enabled = !isSaving) {
+                if (isSaving) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text("Save")
                 }
             }
         }
@@ -3581,7 +4579,7 @@ private fun QueryBlockCard(
                 }
                 if (onEditQuery != null) {
                     TextButton(onClick = onEditQuery) {
-                        Text("Bearbeiten")
+                        Text("Edit")
                     }
                 }
             }
@@ -3599,7 +4597,7 @@ private fun QueryBlockCard(
             if (result.rows.isEmpty()) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Keine Ergebnisse",
+                    "No results",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -3765,7 +4763,7 @@ private fun HomeScreen(
     if (uiState.settings.serverUrl.isBlank()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
-                "Konfiguriere die Server-URL in den Settings.",
+                "Configure the server URL in Settings.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -3775,11 +4773,16 @@ private fun HomeScreen(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            top = 16.dp,
+            end = 16.dp,
+            bottom = rootFabContentBottomPadding,
+        ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (today.overdue.isNotEmpty()) {
-            item { SectionHeader("Ueberfaellig (${today.overdue.size})") }
+            item { SectionHeader("Overdue (${today.overdue.size})") }
             items(today.overdue, key = { it.ref }) { task ->
                 TaskResultCard(
                     task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
@@ -3792,7 +4795,7 @@ private fun HomeScreen(
         }
 
         if (today.dueToday.isNotEmpty()) {
-            item { SectionHeader("Heute faellig (${today.dueToday.size})") }
+            item { SectionHeader("Due today (${today.dueToday.size})") }
             items(today.dueToday, key = { it.ref }) { task ->
                 TaskResultCard(
                     task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
@@ -3805,7 +4808,7 @@ private fun HomeScreen(
         }
 
         if (today.remindersToday.isNotEmpty()) {
-            item { SectionHeader("Erinnerungen") }
+            item { SectionHeader("Reminders") }
             items(today.remindersToday, key = { it.ref }) { task ->
                 TaskResultCard(
                     task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
@@ -3826,7 +4829,7 @@ private fun HomeScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        "Keine Aufgaben fuer heute.",
+                        "No tasks for today.",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -4041,14 +5044,18 @@ private fun TaskResultActionsSheet(
     }
 }
 
-private fun TaskItem.toTaskResultCardModel(scopePrefix: String): TaskResultCardModel {
+private fun TaskItem.toTaskResultCardModel(scopePrefix: String, includePageInSupportingText: Boolean = true): TaskResultCardModel {
     val pageLabel = displayPagePath(page, scopePrefix).ifBlank { page }
     val supportingText = buildString {
         if (!who.isNullOrBlank()) {
             append(who)
-            append(" \u00B7 ")
         }
-        append(pageLabel)
+        if (includePageInSupportingText && pageLabel.isNotBlank()) {
+            if (isNotBlank()) {
+                append(" \u00B7 ")
+            }
+            append(pageLabel)
+        }
     }.ifBlank { null }
     return TaskResultCardModel(
         ref = ref,
@@ -4103,25 +5110,98 @@ private fun TaskResultCardModel.toApiTaskItem(): ApiTaskItem {
 private fun BrowseScreen(
     pages: List<ApiPageSummary>,
     scopePrefix: String,
+    currentFolder: String,
+    selectedTag: String,
+    onCurrentFolderChange: (String) -> Unit,
+    onSelectedTagChange: (String) -> Unit,
     onOpenPage: (String) -> Unit,
 ) {
-    var currentFolder by rememberSaveable { mutableStateOf("") }
-
-    val tree = remember(pages, scopePrefix) { buildFileTree(pages, scopePrefix) }
+    val availableTags = remember(pages) {
+        pages
+            .flatMap { it.tags.orEmpty() }
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinctBy { it.lowercase() }
+            .sortedBy { it.lowercase() }
+    }
+    val filteredPages = remember(pages, selectedTag) {
+        val normalizedTag = selectedTag.trim()
+        if (normalizedTag.isBlank()) {
+            pages
+        } else {
+            pages.filter { page ->
+                page.tags.orEmpty().any { tag -> tag.equals(normalizedTag, ignoreCase = true) }
+            }
+        }
+    }
+    val tree = remember(filteredPages, scopePrefix) { buildFileTree(filteredPages, scopePrefix) }
     val entries = remember(tree, currentFolder) { entriesForFolder(tree, currentFolder) }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
+    LaunchedEffect(availableTags, selectedTag) {
+        if (selectedTag.isNotBlank() && availableTags.none { it.equals(selectedTag, ignoreCase = true) }) {
+            onSelectedTagChange("")
+        }
+    }
+
+    LaunchedEffect(tree, currentFolder) {
+        if (currentFolder.isNotEmpty() && currentFolder !in tree.folderPaths && !tree.folderChildren.containsKey(currentFolder)) {
+            onCurrentFolderChange("")
+        }
+    }
+
+    BackHandler(enabled = currentFolder.isNotEmpty()) {
+        onCurrentFolderChange(currentFolder.substringBeforeLast('/', ""))
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (availableTags.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = selectedTag.isBlank(),
+                    onClick = { onSelectedTagChange("") },
+                    label = { Text("All tags") },
+                )
+                availableTags.forEach { tag ->
+                    FilterChip(
+                        selected = selectedTag.equals(tag, ignoreCase = true),
+                        onClick = {
+                            onSelectedTagChange(
+                                if (selectedTag.equals(tag, ignoreCase = true)) {
+                                    ""
+                                } else {
+                                    tag
+                                },
+                            )
+                        },
+                        label = { Text(tag) },
+                    )
+                }
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                top = if (availableTags.isEmpty()) 8.dp else 0.dp,
+                end = 16.dp,
+                bottom = rootFabContentBottomPadding,
+            ),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
         if (currentFolder.isNotEmpty()) {
             item(key = "..") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            currentFolder = currentFolder.substringBeforeLast('/', "")
+                            onCurrentFolderChange(currentFolder.substringBeforeLast('/', ""))
                         }
                         .padding(vertical = 10.dp, horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -4148,7 +5228,7 @@ private fun BrowseScreen(
                     .fillMaxWidth()
                     .clickable {
                         if (entry.isFolder) {
-                            currentFolder = entry.nodePath
+                            onCurrentFolderChange(entry.nodePath)
                         } else {
                             entry.openPath?.let(onOpenPage)
                         }
@@ -4171,7 +5251,7 @@ private fun BrowseScreen(
                     )
                     if (entry.isFolder) {
                         Text(
-                            text = "${entry.childCount} Eintraege",
+                            text = "${entry.childCount} items",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -4180,7 +5260,7 @@ private fun BrowseScreen(
             }
         }
 
-        if (entries.isEmpty() && currentFolder.isEmpty() && pages.isEmpty()) {
+            if (entries.isEmpty() && currentFolder.isEmpty() && filteredPages.isEmpty()) {
             item {
                 Box(
                     Modifier
@@ -4189,13 +5269,14 @@ private fun BrowseScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        "Keine Seiten geladen.",
+                        if (pages.isEmpty()) "No pages loaded." else "No pages for this tag.",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
         }
+    }
     }
 }
 
@@ -4286,22 +5367,33 @@ private fun entriesForFolder(tree: FileTree, folder: String): List<FileEntry> {
 private fun TasksScreen(
     tasks: List<TaskItem>,
     scopePrefix: String,
+    filterText: String,
+    taskFilter: TaskListFilter,
+    onFilterTextChange: (String) -> Unit,
+    onTaskFilterChange: (TaskListFilter) -> Unit,
     onOpenPage: (String) -> Unit,
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
 ) {
-    var filterText by rememberSaveable { mutableStateOf("") }
-
-    val filteredTasks = remember(tasks, filterText) {
-        if (filterText.isBlank()) {
-            tasks
-        } else {
-            val lower = filterText.lowercase()
-            tasks.filter { task ->
+    val today = LocalDate.now()
+    val filteredTasks = remember(tasks, filterText, taskFilter, today) {
+        val lower = filterText.trim().lowercase()
+        tasks.filter { task ->
+            val matchesText = lower.isBlank() ||
                 task.name.lowercase().contains(lower) ||
-                    task.page.lowercase().contains(lower) ||
-                    task.who?.lowercase()?.contains(lower) == true
+                task.page.lowercase().contains(lower) ||
+                task.who?.lowercase()?.contains(lower) == true
+            val dueDate = parseTaskDateValue(task.due)
+            val matchesQuickFilter = when (taskFilter) {
+                TaskListFilter.Open -> !task.done
+                TaskListFilter.Done -> task.done
+                TaskListFilter.All -> true
+                TaskListFilter.WithDue -> !task.due.isNullOrBlank()
+                TaskListFilter.WithReminder -> !task.remind.isNullOrBlank()
+                TaskListFilter.Today -> dueDate == today
+                TaskListFilter.Overdue -> dueDate?.isBefore(today) == true
             }
+            matchesText && matchesQuickFilter
         }
     }
 
@@ -4312,23 +5404,39 @@ private fun TasksScreen(
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
             value = filterText,
-            onValueChange = { filterText = it },
+            onValueChange = onFilterTextChange,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
-            placeholder = { Text("Tasks filtern...") },
+            placeholder = { Text("Filter tasks...") },
             singleLine = true,
             trailingIcon = {
                 if (filterText.isNotEmpty()) {
-                    IconButton(onClick = { filterText = "" }) {
-                        Icon(Icons.Default.Close, contentDescription = "Leeren")
+                    IconButton(onClick = { onFilterTextChange("") }) {
+                        Icon(Icons.Default.Close, contentDescription = "Clear")
                     }
                 }
             },
         )
 
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TaskListFilter.entries.forEach { candidate ->
+                FilterChip(
+                    selected = taskFilter == candidate,
+                    onClick = { onTaskFilterChange(candidate) },
+                    label = { Text(candidate.label) },
+                )
+            }
+        }
+
         Text(
-            "${filteredTasks.size} offene Tasks",
+            "${filteredTasks.size} Tasks",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -4336,7 +5444,12 @@ private fun TasksScreen(
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                top = 4.dp,
+                end = 16.dp,
+                bottom = rootFabContentBottomPadding,
+            ),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             groupedTasks.forEach { (page, pageTasks) ->
@@ -4351,12 +5464,32 @@ private fun TasksScreen(
                 }
                 items(pageTasks, key = { it.ref }) { task ->
                     TaskResultCard(
-                        task = task.toTaskResultCardModel(scopePrefix),
+                        task = task.toTaskResultCardModel(
+                            scopePrefix = scopePrefix,
+                            includePageInSupportingText = false,
+                        ),
                         scopePrefix = scopePrefix,
                         onOpenPage = onOpenPage,
                         onPatchTask = onPatchTask,
                         onDeleteTask = onDeleteTask,
                     )
+                }
+            }
+
+            if (groupedTasks.isEmpty()) {
+                item("empty") {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "No tasks for this filter.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -4369,37 +5502,36 @@ private fun TasksScreen(
 private fun SearchScreen(
     uiState: MainUiState,
     scopePrefix: String,
-    onSearch: (String) -> Unit,
+    searchText: String,
+    onSearchTextChange: (String) -> Unit,
     onClear: () -> Unit,
     onOpenPage: (String) -> Unit,
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
 ) {
-    var searchText by rememberSaveable { mutableStateOf("") }
     val keyboardController = LocalSoftwareKeyboardController.current
     val openTaskByRef = remember(uiState.tasks) { uiState.tasks.associateBy { it.ref } }
 
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
             value = searchText,
-            onValueChange = {
-                searchText = it
-                onSearch(it)
-            },
+            onValueChange = onSearchTextChange,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
-            placeholder = { Text("Suche...") },
+            placeholder = { Text("Search...") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { keyboardController?.hide() }),
             trailingIcon = {
-                if (searchText.isNotEmpty()) {
-                    IconButton(onClick = {
-                        searchText = ""
-                        onClear()
-                    }) {
-                        Icon(Icons.Default.Close, contentDescription = "Leeren")
+                if (searchText.isNotBlank() || uiState.searchResults != null) {
+                    IconButton(
+                        onClick = {
+                            keyboardController?.hide()
+                            onClear()
+                        },
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Clear")
                     }
                 }
             },
@@ -4413,11 +5545,16 @@ private fun SearchScreen(
         if (results != null) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    top = 8.dp,
+                    end = 16.dp,
+                    bottom = rootFabContentBottomPadding,
+                ),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (results.pages.isNotEmpty()) {
-                    item { SectionHeader("Seiten (${results.pages.size})") }
+                    item { SectionHeader("Pages (${results.pages.size})") }
                     items(results.pages, key = { "p:${it.path}:${it.line}" }) { page ->
                         Card(
                             modifier = Modifier
@@ -4475,7 +5612,7 @@ private fun SearchScreen(
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                "Keine Ergebnisse.",
+                                "No results.",
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

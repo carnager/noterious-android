@@ -28,6 +28,38 @@ internal fun scopePrefixForVault(vault: VaultRecord): String {
     return normalizeScopePrefix(rawValue)
 }
 
+internal fun displayScopeName(value: String): String {
+    val normalized = normalizeScopePrefix(value)
+    if (normalized.isBlank()) {
+        return ""
+    }
+    return normalized
+        .substringAfterLast('/')
+        .removePrefix("root__")
+        .removePrefix("root_")
+        .removePrefix("root-")
+        .trim()
+}
+
+internal fun displayScopeName(vault: VaultRecord): String {
+    val pathLeaf = vault.vaultPath.replace('\\', '/').substringAfterLast('/', vault.vaultPath)
+    return sequenceOf(vault.name, pathLeaf, vault.key)
+        .map(::displayScopeName)
+        .firstOrNull(String::isNotBlank)
+        ?: "Scope"
+}
+
+internal fun displayCurrentScopeLabel(scopePrefix: String, vaults: List<VaultRecord>): String {
+    val normalizedScopePrefix = normalizeScopePrefix(scopePrefix)
+    if (normalizedScopePrefix.isBlank()) {
+        return "All scopes"
+    }
+    return vaults
+        .firstOrNull { scopePrefixForVault(it) == normalizedScopePrefix }
+        ?.let(::displayScopeName)
+        ?: displayScopeName(normalizedScopePrefix).ifBlank { normalizedScopePrefix }
+}
+
 internal fun displayPagePath(path: String, scopePrefix: String): String {
     val normalizedPath = normalizePagePath(path)
     val normalizedScopePrefix = normalizeScopePrefix(scopePrefix)

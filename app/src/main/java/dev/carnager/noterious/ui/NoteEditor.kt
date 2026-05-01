@@ -363,7 +363,7 @@ internal fun GuiNoteEditor(
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = "Noch keine Bloecke. Nutze das Slash-Menue zum Einfuegen.",
+                    text = "No blocks yet. Use the slash menu to insert one.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

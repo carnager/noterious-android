@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="Noterious Android logo" width="148" />
+</p>
+
 # Noterious Android
 
 Android client for Noterious.

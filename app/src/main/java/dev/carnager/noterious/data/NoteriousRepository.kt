@@ -20,6 +20,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.BufferedInputStream
 import java.io.BufferedReader
@@ -52,6 +53,17 @@ class NoteriousRepository {
         val due: String? = null,
         val remind: String? = null,
         val click: String? = null,
+    )
+
+    @Serializable
+    private data class PagePatchRequest(
+        val frontmatter: FrontmatterPatch? = null,
+    )
+
+    @Serializable
+    private data class FrontmatterPatch(
+        val set: JsonObject? = null,
+        val remove: List<String> = emptyList(),
     )
 
     @Volatile
@@ -103,7 +115,7 @@ class NoteriousRepository {
         val apiTasks = json.decodeFromString<ApiTasksResponse>(
             performGet(apiEndpointUrl(baseUrl, "tasks"), bearerToken, scopePrefix),
         ).tasks
-        apiTasks.filter { !it.done }.map(::toTaskItem)
+        apiTasks.map(::toTaskItem)
     }
 
     suspend fun fetchPageDetail(
@@ -188,6 +200,49 @@ class NoteriousRepository {
                 fileName = fileName,
                 contentType = contentType.ifBlank { "application/octet-stream" },
                 fileContent = content,
+            ),
+        )
+    }
+
+    suspend fun patchPageFrontmatter(
+        url: String,
+        pagePath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+        set: Map<String, JsonElement> = emptyMap(),
+        remove: List<String> = emptyList(),
+    ): ApiPageDetail = withContext(Dispatchers.IO) {
+        val normalizedRemove = remove.map(String::trim).filter(String::isNotBlank)
+        if (set.isEmpty() && normalizedRemove.isEmpty()) {
+            return@withContext fetchPageDetail(
+                url = url,
+                pagePath = pagePath,
+                scopePrefix = scopePrefix,
+                bearerToken = bearerToken,
+                username = username,
+                password = password,
+            )
+        }
+
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            PagePatchRequest(
+                frontmatter = FrontmatterPatch(
+                    set = set.takeIf(Map<String, JsonElement>::isNotEmpty)?.let(::JsonObject),
+                    remove = normalizedRemove,
+                ),
+            ),
+        )
+        json.decodeFromString<ApiPageDetail>(
+            performRequest(
+                method = "PATCH",
+                url = pageUrl(baseUrl, pagePath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
             ),
         )
     }
@@ -333,14 +388,15 @@ class NoteriousRepository {
     fun buildTodaySnapshot(tasks: List<TaskItem>): TodaySnapshot {
         val today = LocalDate.now(ZoneId.systemDefault())
         val todayString = today.toString()
+        val openTasks = tasks.filterNot { it.done }
 
-        val overdue = tasks.filter { task ->
+        val overdue = openTasks.filter { task ->
             task.due?.let(::parseIsoDate)?.isBefore(today) == true
         }
-        val dueToday = tasks.filter { task ->
+        val dueToday = openTasks.filter { task ->
             task.due?.let(::parseIsoDate) == today
         }
-        val remindersToday = tasks.filter { task ->
+        val remindersToday = openTasks.filter { task ->
             task.remind?.take(10) == todayString
         }
 
