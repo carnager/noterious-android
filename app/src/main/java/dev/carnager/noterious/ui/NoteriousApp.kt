@@ -120,6 +120,7 @@ import dev.carnager.noterious.model.ApiTaskItem
 import dev.carnager.noterious.model.DerivedPageResponse
 import dev.carnager.noterious.model.DocumentRecord
 import dev.carnager.noterious.model.QueryBlock
+import dev.carnager.noterious.model.SearchTaskResult
 import dev.carnager.noterious.model.TaskItem
 import dev.carnager.noterious.model.VaultRecord
 import kotlinx.coroutines.Dispatchers
@@ -199,6 +200,19 @@ private data class ImageDownloadPayload(
     val mimeType: String,
 )
 
+private data class TaskResultCardModel(
+    val ref: String,
+    val page: String,
+    val line: Int?,
+    val text: String,
+    val done: Boolean,
+    val due: String?,
+    val remind: String?,
+    val click: String?,
+    val supportingText: String?,
+    val snippet: String? = null,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NoteriousApp(viewModel: MainViewModel) {
@@ -276,13 +290,14 @@ fun NoteriousApp(viewModel: MainViewModel) {
                 viewModel.saveOpenPage(markdown, baseMarkdown, onResult)
             },
             onShowGlobalMenu = { showSlashMenu = true },
-            onPatchTask = { taskRef, text, state, due, remind, onResult ->
+            onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
                 viewModel.patchOpenPageTask(
                     taskRef = taskRef,
                     text = text,
                     state = state,
                     due = due,
                     remind = remind,
+                    click = click,
                     onResult = onResult,
                 )
             },
@@ -409,7 +424,24 @@ fun NoteriousApp(viewModel: MainViewModel) {
                 label = "tab",
             ) { tab ->
                 when (tab) {
-                    Tab.Home -> HomeScreen(uiState = uiState, onOpenPage = { viewModel.openPage(it) })
+                    Tab.Home -> HomeScreen(
+                        uiState = uiState,
+                        onOpenPage = { viewModel.openPage(it) },
+                        onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
+                            viewModel.patchTask(
+                                taskRef = taskRef,
+                                text = text,
+                                state = state,
+                                due = due,
+                                remind = remind,
+                                click = click,
+                                onResult = onResult,
+                            )
+                        },
+                        onDeleteTask = { taskRef, onResult ->
+                            viewModel.deleteTask(taskRef, onResult)
+                        },
+                    )
                     Tab.Browse -> BrowseScreen(
                         pages = uiState.pages,
                         scopePrefix = uiState.settings.scopePrefix,
@@ -419,6 +451,20 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         tasks = uiState.tasks,
                         scopePrefix = uiState.settings.scopePrefix,
                         onOpenPage = { viewModel.openPage(it) },
+                        onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
+                            viewModel.patchTask(
+                                taskRef = taskRef,
+                                text = text,
+                                state = state,
+                                due = due,
+                                remind = remind,
+                                click = click,
+                                onResult = onResult,
+                            )
+                        },
+                        onDeleteTask = { taskRef, onResult ->
+                            viewModel.deleteTask(taskRef, onResult)
+                        },
                     )
                     Tab.Search -> SearchScreen(
                         uiState = uiState,
@@ -426,6 +472,20 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         onSearch = { viewModel.search(it) },
                         onClear = { viewModel.clearSearch() },
                         onOpenPage = { viewModel.openPage(it) },
+                        onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
+                            viewModel.patchTask(
+                                taskRef = taskRef,
+                                text = text,
+                                state = state,
+                                due = due,
+                                remind = remind,
+                                click = click,
+                                onResult = onResult,
+                            )
+                        },
+                        onDeleteTask = { taskRef, onResult ->
+                            viewModel.deleteTask(taskRef, onResult)
+                        },
                     )
                     Tab.Settings -> SettingsScreen(
                         settings = uiState.settings,
@@ -730,7 +790,7 @@ private fun PageViewerScreen(
     onClearError: () -> Unit,
     onSavePage: (String, String, (Boolean) -> Unit) -> Unit,
     onShowGlobalMenu: () -> Unit,
-    onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, onResult: (Boolean) -> Unit) -> Unit,
+    onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onUploadDocument: (Uri, (DocumentRecord?) -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
@@ -739,6 +799,7 @@ private fun PageViewerScreen(
     val focusRequester = remember { FocusRequester() }
     val snackbarHostState = remember { SnackbarHostState() }
     val noteContentBottomPadding = 104.dp
+    val taskReminderClickTarget = remember(pagePath) { noteriousPageDeepLink(pagePath) }
     val displayPath = remember(pagePath, settings.scopePrefix) {
         displayPagePath(pagePath, settings.scopePrefix).ifBlank { pagePath }
     }
@@ -1053,11 +1114,12 @@ private fun PageViewerScreen(
         state: String? = null,
         due: String? = null,
         remind: String? = null,
+        click: String? = null,
         onSuccess: (() -> Unit)? = null,
     ) {
         if (pendingTaskRef != null) return
         pendingTaskRef = taskRef
-        onPatchTask(taskRef, text, state, due, remind) { success ->
+        onPatchTask(taskRef, text, state, due, remind, click) { success ->
             pendingTaskRef = null
             if (success) {
                 taskTextEditorState = null
@@ -1688,10 +1750,16 @@ private fun PageViewerScreen(
             isSaving = pendingTaskRef == openTaskSchedule.ref,
             onDismiss = { taskScheduleEditorState = null },
             onSave = { dueValue, remindValue ->
+                val clickValue = when {
+                    remindValue.isNotBlank() && openTaskSchedule.click.isNullOrBlank() -> taskReminderClickTarget
+                    remindValue.isBlank() && openTaskSchedule.click == taskReminderClickTarget -> ""
+                    else -> null
+                }
                 patchTask(
                     taskRef = openTaskSchedule.ref,
                     due = dueValue,
                     remind = remindValue,
+                    click = clickValue,
                 )
             },
         )
@@ -2751,6 +2819,28 @@ private fun stripTaskInlineFields(text: String): String {
         .trim()
 }
 
+private fun taskFieldValue(text: String, field: String): String? {
+    val normalizedField = field.trim().lowercase()
+    if (normalizedField.isBlank()) return null
+
+    val bracketMatch = Regex(
+        pattern = "\\[${Regex.escape(normalizedField)}:\\s*([^\\]]*?)\\]",
+        option = RegexOption.IGNORE_CASE,
+    ).find(text)
+    if (bracketMatch != null) {
+        return bracketMatch.groupValues[1]
+            .trim()
+            .trim('"')
+            .takeIf(String::isNotBlank)
+    }
+
+    val inlineMatch = Regex(
+        pattern = "\\b${Regex.escape(normalizedField)}::\\s*(.*?)(?=(\\s+\\b(due|remind|who|click|completed)::)|$)",
+        option = RegexOption.IGNORE_CASE,
+    ).find(text)
+    return inlineMatch?.groupValues?.getOrNull(1)?.trim()?.takeIf(String::isNotBlank)
+}
+
 private fun taskScheduleLabel(due: String?, remind: String?): String? {
     val parts = buildList {
         due?.takeIf(String::isNotBlank)?.let {
@@ -3664,7 +3754,12 @@ private fun queryCellAnnotatedText(
 // ─── Home Screen ────────────────────────────────────────────────────────
 
 @Composable
-private fun HomeScreen(uiState: MainUiState, onOpenPage: (String) -> Unit) {
+private fun HomeScreen(
+    uiState: MainUiState,
+    onOpenPage: (String) -> Unit,
+    onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
+    onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
+) {
     val today = uiState.today
 
     if (uiState.settings.serverUrl.isBlank()) {
@@ -3686,21 +3781,39 @@ private fun HomeScreen(uiState: MainUiState, onOpenPage: (String) -> Unit) {
         if (today.overdue.isNotEmpty()) {
             item { SectionHeader("Ueberfaellig (${today.overdue.size})") }
             items(today.overdue, key = { it.ref }) { task ->
-                TaskRow(task = task, onOpenPage = onOpenPage)
+                TaskResultCard(
+                    task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
+                    scopePrefix = uiState.settings.scopePrefix,
+                    onOpenPage = onOpenPage,
+                    onPatchTask = onPatchTask,
+                    onDeleteTask = onDeleteTask,
+                )
             }
         }
 
         if (today.dueToday.isNotEmpty()) {
             item { SectionHeader("Heute faellig (${today.dueToday.size})") }
             items(today.dueToday, key = { it.ref }) { task ->
-                TaskRow(task = task, onOpenPage = onOpenPage)
+                TaskResultCard(
+                    task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
+                    scopePrefix = uiState.settings.scopePrefix,
+                    onOpenPage = onOpenPage,
+                    onPatchTask = onPatchTask,
+                    onDeleteTask = onDeleteTask,
+                )
             }
         }
 
         if (today.remindersToday.isNotEmpty()) {
             item { SectionHeader("Erinnerungen") }
             items(today.remindersToday, key = { it.ref }) { task ->
-                TaskRow(task = task, onOpenPage = onOpenPage)
+                TaskResultCard(
+                    task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
+                    scopePrefix = uiState.settings.scopePrefix,
+                    onOpenPage = onOpenPage,
+                    onPatchTask = onPatchTask,
+                    onDeleteTask = onDeleteTask,
+                )
             }
         }
 
@@ -3734,45 +3847,254 @@ private fun SectionHeader(title: String) {
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun TaskRow(task: TaskItem, onOpenPage: (String) -> Unit) {
+private fun TaskResultCard(
+    task: TaskResultCardModel,
+    scopePrefix: String,
+    onOpenPage: (String) -> Unit,
+    onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
+    onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
+) {
+    var isBusy by remember(task.ref) { mutableStateOf(false) }
+    var showScheduleSheet by remember(task.ref) { mutableStateOf(false) }
+    var showActionSheet by remember(task.ref) { mutableStateOf(false) }
+    val autoReminderClickTarget = remember(task.page) { noteriousPageDeepLink(task.page) }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onOpenPage(task.page) },
+            .combinedClickable(
+                enabled = !isBusy,
+                onClick = { onOpenPage(task.page) },
+                onLongClick = { showActionSheet = true },
+            ),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(12.dp),
     ) {
-        Row(
+        Column(
             modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.Top,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Icon(
-                if (task.done) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                contentDescription = null,
-                tint = if (task.done) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline,
-                modifier = Modifier.size(20.dp),
+            TaskPreviewRow(
+                text = stripTaskInlineFields(task.text),
+                checked = task.done,
+                due = task.due,
+                remind = task.remind,
+                interactive = true,
+                isBusy = isBusy,
+                onToggle = {
+                    isBusy = true
+                    onPatchTask(
+                        task.ref,
+                        null,
+                        if (task.done) "todo" else "done",
+                        null,
+                        null,
+                        null,
+                    ) {
+                        isBusy = false
+                    }
+                },
+                onEditText = null,
+                onEditSchedule = { showScheduleSheet = true },
+                onLongPress = null,
+                onLinkClick = null,
             )
-            Column(modifier = Modifier.weight(1f)) {
+            task.supportingText?.takeIf(String::isNotBlank)?.let { supportingText ->
                 Text(
-                    text = task.name,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                val meta = buildList {
-                    task.due?.let { add("Faellig: $it") }
-                    task.who?.let { add(it) }
-                    add(task.page.substringAfterLast('/'))
-                }.joinToString(" \u00B7 ")
-                Text(
-                    text = meta,
+                    text = supportingText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 40.dp),
+                )
+            }
+            task.snippet?.takeIf(String::isNotBlank)?.let { snippet ->
+                Text(
+                    text = snippet,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 40.dp),
                 )
             }
         }
     }
+
+    if (showScheduleSheet) {
+        TaskScheduleSheet(
+            task = task.toApiTaskItem(),
+            lineNumber = task.line?.takeIf { it > 0 },
+            isSaving = isBusy,
+            onDismiss = {
+                if (!isBusy) {
+                    showScheduleSheet = false
+                }
+            },
+            onSave = { dueValue, remindValue ->
+                val clickValue = when {
+                    remindValue.isNotBlank() && task.click.isNullOrBlank() -> autoReminderClickTarget
+                    remindValue.isBlank() && task.click == autoReminderClickTarget -> ""
+                    else -> null
+                }
+                isBusy = true
+                onPatchTask(
+                    task.ref,
+                    null,
+                    null,
+                    dueValue,
+                    remindValue,
+                    clickValue,
+                ) { success ->
+                    isBusy = false
+                    if (success) {
+                        showScheduleSheet = false
+                    }
+                }
+            },
+        )
+    }
+
+    if (showActionSheet) {
+        TaskResultActionsSheet(
+            pagePath = displayPagePath(task.page, scopePrefix).ifBlank { task.page },
+            isBusy = isBusy,
+            onDismiss = {
+                if (!isBusy) {
+                    showActionSheet = false
+                }
+            },
+            onOpenPage = {
+                showActionSheet = false
+                onOpenPage(task.page)
+            },
+            onDeleteTask = {
+                isBusy = true
+                onDeleteTask(task.ref) { success ->
+                    isBusy = false
+                    if (success) {
+                        showActionSheet = false
+                    }
+                }
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TaskResultActionsSheet(
+    pagePath: String,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onOpenPage: () -> Unit,
+    onDeleteTask: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Task actions",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = pagePath,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onOpenPage,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Open source page")
+            }
+            TextButton(
+                onClick = onDeleteTask,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (isBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Text(
+                        text = "Delete task",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+private fun TaskItem.toTaskResultCardModel(scopePrefix: String): TaskResultCardModel {
+    val pageLabel = displayPagePath(page, scopePrefix).ifBlank { page }
+    val supportingText = buildString {
+        if (!who.isNullOrBlank()) {
+            append(who)
+            append(" \u00B7 ")
+        }
+        append(pageLabel)
+    }.ifBlank { null }
+    return TaskResultCardModel(
+        ref = ref,
+        page = page,
+        line = line,
+        text = name,
+        done = done,
+        due = due,
+        remind = remind,
+        click = click,
+        supportingText = supportingText,
+    )
+}
+
+private fun SearchTaskResult.toTaskResultCardModel(scopePrefix: String, openTask: TaskItem?): TaskResultCardModel {
+    val normalizedText = text
+    val visibleText = stripTaskInlineFields(normalizedText)
+    val pageLabel = displayPagePath(page, scopePrefix).ifBlank { page }
+    val snippetText = snippet
+        .trim()
+        .takeIf { it.isNotBlank() && it != normalizedText && it != visibleText }
+    return TaskResultCardModel(
+        ref = ref,
+        page = page,
+        line = line.takeIf { it > 0 },
+        text = normalizedText,
+        done = done,
+        due = openTask?.due ?: taskFieldValue(normalizedText, "due"),
+        remind = openTask?.remind ?: taskFieldValue(normalizedText, "remind"),
+        click = openTask?.click ?: taskFieldValue(normalizedText, "click"),
+        supportingText = pageLabel,
+        snippet = snippetText,
+    )
+}
+
+private fun TaskResultCardModel.toApiTaskItem(): ApiTaskItem {
+    return ApiTaskItem(
+        ref = ref,
+        page = page,
+        line = line,
+        text = text,
+        done = done,
+        due = due,
+        remind = remind,
+        click = click,
+    )
 }
 
 // ─── Browse Screen (fixed file tree) ────────────────────────────────────
@@ -3965,6 +4287,8 @@ private fun TasksScreen(
     tasks: List<TaskItem>,
     scopePrefix: String,
     onOpenPage: (String) -> Unit,
+    onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
+    onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
 ) {
     var filterText by rememberSaveable { mutableStateOf("") }
 
@@ -4026,7 +4350,13 @@ private fun TasksScreen(
                     )
                 }
                 items(pageTasks, key = { it.ref }) { task ->
-                    TaskRow(task = task, onOpenPage = onOpenPage)
+                    TaskResultCard(
+                        task = task.toTaskResultCardModel(scopePrefix),
+                        scopePrefix = scopePrefix,
+                        onOpenPage = onOpenPage,
+                        onPatchTask = onPatchTask,
+                        onDeleteTask = onDeleteTask,
+                    )
                 }
             }
         }
@@ -4042,9 +4372,12 @@ private fun SearchScreen(
     onSearch: (String) -> Unit,
     onClear: () -> Unit,
     onOpenPage: (String) -> Unit,
+    onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
+    onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
 ) {
     var searchText by rememberSaveable { mutableStateOf("") }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val openTaskByRef = remember(uiState.tasks) { uiState.tasks.associateBy { it.ref } }
 
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
@@ -4123,38 +4456,13 @@ private fun SearchScreen(
                 if (results.tasks.isNotEmpty()) {
                     item { SectionHeader("Tasks (${results.tasks.size})") }
                     items(results.tasks, key = { "t:${it.ref}" }) { task ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenPage(task.page) },
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(12.dp),
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.Top,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Icon(
-                                    if (task.done) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                                    contentDescription = null,
-                                    tint = if (task.done) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline,
-                                    modifier = Modifier.size(20.dp),
-                                )
-                                Column {
-                                    Text(
-                                        text = task.text,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    )
-                                    Text(
-                                        text = displayPagePath(task.page, scopePrefix).ifBlank { task.page },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                            }
-                        }
+                        TaskResultCard(
+                            task = task.toTaskResultCardModel(scopePrefix, openTaskByRef[task.ref]),
+                            scopePrefix = scopePrefix,
+                            onOpenPage = onOpenPage,
+                            onPatchTask = onPatchTask,
+                            onDeleteTask = onDeleteTask,
+                        )
                     }
                 }
 

@@ -62,6 +62,15 @@ internal fun pageTitleFromPath(pagePath: String): String {
     return normalized.substringAfterLast('/', normalized)
 }
 
+internal fun noteriousPageDeepLink(pagePath: String): String {
+    val normalizedPagePath = normalizePagePath(pagePath)
+    if (normalizedPagePath.isBlank()) {
+        return "noterious://open"
+    }
+    val encodedPagePath = URLEncoder.encode(normalizedPagePath, Charsets.UTF_8.name())
+    return "noterious://open?page=$encodedPagePath"
+}
+
 internal fun pageDirectory(pagePath: String): String {
     val normalized = normalizePagePath(pagePath)
     if (!normalized.contains('/')) {

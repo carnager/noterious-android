@@ -7,8 +7,9 @@ It focuses on fast note browsing and a mobile-friendly reading/editing flow for 
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/quote-and-media.png" alt="Quote and media rendering in Noterious Android" width="320" />
-  <img src="docs/screenshots/editor-mode.png" alt="Task scheduling sheet in Noterious Android" width="320" />
+  <img src="docs/screenshots/quote-and-media.png" alt="Quote and media rendering in Noterious Android" width="300" />
+  <img src="docs/screenshots/editor-mode.png" alt="Note editing and task scheduling in Noterious Android" width="300" />
+  <img src="docs/screenshots/tasks-panel.png" alt="Interactive task panel in Noterious Android" width="300" />
 </p>
 
 ## What It Already Does
@@ -18,15 +19,16 @@ It focuses on fast note browsing and a mobile-friendly reading/editing flow for 
 - Render headings, lists, tasks, quotes, code fences, tables, links, and images
 - Run and display embedded queries
 - Toggle tasks and edit task due/reminder metadata
+- Use interactive task cards from home, tasks, and search, including source-page open/delete actions
 - Edit notes with a lightweight GUI edit mode plus raw markdown mode
 - Upload files and insert image/document links
 - Save or share embedded images
 
 ## Release
 
-The first downloadable APK is published in the GitHub Releases section.
+The latest downloadable APK is published in the GitHub Releases section.
 
-Current app version: `0.1.0`
+Current app version: `0.1.1`
 
 ## Build
 

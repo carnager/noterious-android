@@ -51,6 +51,7 @@ class NoteriousRepository {
         val state: String? = null,
         val due: String? = null,
         val remind: String? = null,
+        val click: String? = null,
     )
 
     @Volatile
@@ -202,6 +203,7 @@ class NoteriousRepository {
         state: String? = null,
         due: String? = null,
         remind: String? = null,
+        click: String? = null,
     ): ApiTaskItem = withContext(Dispatchers.IO) {
         val baseUrl = normalizeBaseUrl(url)
         ensureAuthenticated(baseUrl, bearerToken, username, password)
@@ -211,6 +213,7 @@ class NoteriousRepository {
                 state = state,
                 due = due,
                 remind = remind,
+                click = click,
             ),
         )
         json.decodeFromString<ApiTaskItem>(
@@ -221,6 +224,25 @@ class NoteriousRepository {
                 scopePrefix = scopePrefix,
                 requestBody = requestBody,
             ),
+        )
+    }
+
+    suspend fun deleteTask(
+        url: String,
+        taskRef: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ) = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        performRequest(
+            method = "DELETE",
+            url = taskUrl(baseUrl, taskRef),
+            bearerToken = bearerToken,
+            scopePrefix = scopePrefix,
+            requestBody = null,
         )
     }
 
@@ -344,6 +366,7 @@ class NoteriousRepository {
             who = who,
             due = task.due,
             remind = task.remind,
+            click = task.click,
             followup = who != null,
             remindCandidate = !task.remind.isNullOrBlank() || !task.due.isNullOrBlank(),
         )

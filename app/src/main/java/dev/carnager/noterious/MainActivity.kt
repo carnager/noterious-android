@@ -1,5 +1,6 @@
 package dev.carnager.noterious
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,6 +21,7 @@ class MainActivity : ComponentActivity() {
                 NoteriousApp(viewModel = viewModel)
             }
         }
+        viewModel.handleDeepLink(intent?.data)
     }
 
     override fun onStart() {
@@ -30,5 +32,11 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         viewModel.onAppBackgrounded()
         super.onStop()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        viewModel.handleDeepLink(intent.data)
     }
 }

@@ -54,6 +54,8 @@ data class ApiTaskItem(
     val due: String? = null,
     @Serializable(with = FlexibleStringSerializer::class)
     val remind: String? = null,
+    @Serializable(with = FlexibleStringSerializer::class)
+    val click: String? = null,
     val who: JsonElement? = null,
 )
 
@@ -76,6 +78,8 @@ data class TaskItem(
     val due: String? = null,
     @Serializable(with = FlexibleStringSerializer::class)
     val remind: String? = null,
+    @Serializable(with = FlexibleStringSerializer::class)
+    val click: String? = null,
     val followup: Boolean = false,
     @SerialName("remindCandidate")
     val remindCandidate: Boolean = false,

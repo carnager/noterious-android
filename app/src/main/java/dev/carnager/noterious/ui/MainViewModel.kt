@@ -65,6 +65,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var activeEventStreamKey: String? = null
     private var openPageJob: Job? = null
     private val openPageBackStack = ArrayDeque<String>()
+    private var pendingDeepLinkPagePath: String? = null
 
     init {
         viewModelScope.launch {
@@ -72,6 +73,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 settingsLoaded = true
                 _uiState.update { it.copy(settings = settings) }
                 reconcileEventStream()
+                consumePendingDeepLinkIfPossible()
                 if (appInForeground) {
                     loadForegroundDataIfNeeded(trigger = "settings-loaded")
                 }
@@ -179,6 +181,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onAppForegrounded() {
         appInForeground = true
         reconcileEventStream()
+        consumePendingDeepLinkIfPossible()
         loadForegroundDataIfNeeded(trigger = "foreground")
     }
 
@@ -251,6 +254,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    fun handleDeepLink(uri: Uri?) {
+        val pagePath = when {
+            uri == null -> ""
+            !uri.scheme.equals("noterious", ignoreCase = true) -> ""
+            !uri.host.equals("open", ignoreCase = true) -> ""
+            else -> normalizePagePath(uri.getQueryParameter("page").orEmpty())
+        }
+        if (pagePath.isBlank()) {
+            return
+        }
+
+        pendingDeepLinkPagePath = pagePath
+        consumePendingDeepLinkIfPossible()
     }
 
     fun closePage() {
@@ -420,6 +438,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         state: String? = null,
         due: String? = null,
         remind: String? = null,
+        click: String? = null,
         onResult: (Boolean) -> Unit = {},
     ) {
         val pagePath = _uiState.value.openPagePath ?: run {
@@ -447,6 +466,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     state = state,
                     due = due,
                     remind = remind,
+                    click = click,
                 )
                 val detail = repository.fetchPageDetail(
                     url = settings.serverUrl,
@@ -505,6 +525,90 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun patchTask(
+        taskRef: String,
+        text: String? = null,
+        state: String? = null,
+        due: String? = null,
+        remind: String? = null,
+        click: String? = null,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        val settings = _uiState.value.settings
+        if (settings.serverUrl.isBlank()) {
+            onResult(false)
+            return
+        }
+        val activeSearchQuery = _uiState.value.searchResults?.query?.takeIf(String::isNotBlank)
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(error = null) }
+
+            runCatching {
+                repository.patchTask(
+                    url = settings.serverUrl,
+                    taskRef = taskRef,
+                    scopePrefix = settings.scopePrefix,
+                    bearerToken = settings.bearerToken,
+                    username = settings.username,
+                    password = settings.password,
+                    text = text,
+                    state = state,
+                    due = due,
+                    remind = remind,
+                    click = click,
+                )
+            }.onSuccess {
+                refresh(trigger = "task-change")
+                activeSearchQuery?.let(::search)
+                onResult(true)
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                _uiState.update {
+                    it.copy(error = error.message ?: "Task konnte nicht aktualisiert werden.")
+                }
+                onResult(false)
+            }
+        }
+    }
+
+    fun deleteTask(
+        taskRef: String,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        val settings = _uiState.value.settings
+        if (settings.serverUrl.isBlank()) {
+            onResult(false)
+            return
+        }
+        val activeSearchQuery = _uiState.value.searchResults?.query?.takeIf(String::isNotBlank)
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(error = null) }
+
+            runCatching {
+                repository.deleteTask(
+                    url = settings.serverUrl,
+                    taskRef = taskRef,
+                    scopePrefix = settings.scopePrefix,
+                    bearerToken = settings.bearerToken,
+                    username = settings.username,
+                    password = settings.password,
+                )
+            }.onSuccess {
+                refresh(trigger = "task-delete")
+                activeSearchQuery?.let(::search)
+                onResult(true)
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                _uiState.update {
+                    it.copy(error = error.message ?: "Task konnte nicht geloescht werden.")
+                }
+                onResult(false)
+            }
+        }
+    }
+
     private var searchJob: Job? = null
 
     fun search(query: String) {
@@ -546,6 +650,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun reloadOpenPageIfNeeded() {
         val pagePath = _uiState.value.openPagePath ?: return
+        openPage(pagePath, addToBackStack = false)
+    }
+
+    private fun consumePendingDeepLinkIfPossible() {
+        val pagePath = pendingDeepLinkPagePath ?: return
+        val settings = _uiState.value.settings
+        if (!settingsLoaded || settings.serverUrl.isBlank()) {
+            return
+        }
+
+        pendingDeepLinkPagePath = null
+        openPageBackStack.clear()
         openPage(pagePath, addToBackStack = false)
     }
 
