@@ -271,7 +271,7 @@ private data class TextDocumentExport(
     val content: String,
 )
 
-private val rootFabContentBottomPadding = 104.dp
+private val screenContentBottomPadding = 24.dp
 
 private data class TaskResultCardModel(
     val ref: String,
@@ -642,8 +642,17 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         )
                         Spacer(Modifier.width(8.dp))
                     }
+                    IconButton(
+                        onClick = ::openScopePicker,
+                        enabled = uiState.settings.serverUrl.isNotBlank(),
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = "Change scope")
+                    }
                     IconButton(onClick = { viewModel.refresh() }) {
                         Icon(Icons.Default.Sync, contentDescription = "Refresh")
+                    }
+                    IconButton(onClick = { showSlashMenu = true }) {
+                        Icon(Icons.Default.Menu, contentDescription = "Menu")
                     }
                 },
             )
@@ -674,15 +683,6 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     icon = { Icon(Icons.Default.Settings, contentDescription = null) },
                     label = { Text("Settings") },
                 )
-            }
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { showSlashMenu = true },
-                shape = CircleShape,
-                containerColor = MaterialTheme.colorScheme.primary,
-            ) {
-                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.onPrimary)
             }
         },
     ) { innerPadding ->
@@ -890,6 +890,10 @@ fun NoteriousApp(viewModel: MainViewModel) {
                 showScopePicker = false
                 viewModel.selectVault(vault)
             },
+            onManageVaults = {
+                showScopePicker = false
+                navigateToTab(Tab.Settings)
+            },
         )
     }
 }
@@ -904,6 +908,7 @@ private fun ScopePickerSheet(
     onDismiss: () -> Unit,
     onSelectAll: () -> Unit,
     onSelectVault: (VaultRecord) -> Unit,
+    onManageVaults: () -> Unit,
 ) {
     val normalizedCurrentScope = remember(currentScopePrefix) {
         normalizeScopePrefix(currentScopePrefix)
@@ -959,7 +964,14 @@ private fun ScopePickerSheet(
                 }
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
+            TextButton(
+                onClick = onManageVaults,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Manage vaults")
+            }
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
@@ -7506,12 +7518,12 @@ private fun BrowseScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         if (availableTags.isNotEmpty()) {
-            Row(
+            FlowRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FilterChip(
                     selected = selectedTag.isBlank(),
@@ -7536,12 +7548,12 @@ private fun BrowseScreen(
             }
         }
 
-        Row(
+        FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = if (availableTags.isEmpty()) 8.dp else 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             AssistChip(
                 onClick = {
@@ -7585,7 +7597,7 @@ private fun BrowseScreen(
                 start = 16.dp,
                 top = 0.dp,
                 end = 16.dp,
-                bottom = rootFabContentBottomPadding,
+                bottom = screenContentBottomPadding,
             ),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -7850,12 +7862,12 @@ private fun TasksScreen(
             },
         )
 
-        Row(
+        FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             TaskListFilter.entries.forEach { candidate ->
                 FilterChip(
@@ -7879,7 +7891,7 @@ private fun TasksScreen(
                 start = 16.dp,
                 top = 4.dp,
                 end = 16.dp,
-                bottom = rootFabContentBottomPadding,
+                bottom = screenContentBottomPadding,
             ),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -7943,6 +7955,13 @@ private fun SearchScreen(
 ) {
     val keyboardController = LocalSoftwareKeyboardController.current
     val openTaskByRef = remember(uiState.tasks) { uiState.tasks.associateBy { it.ref } }
+    val searchScopeDescription = remember(scopePrefix) {
+        if (scopePrefix.isBlank()) {
+            "all scopes"
+        } else {
+            "the current scope"
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
@@ -7977,12 +7996,12 @@ private fun SearchScreen(
         if (results != null) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(
-                    start = 16.dp,
-                    top = 8.dp,
-                    end = 16.dp,
-                    bottom = rootFabContentBottomPadding,
-                ),
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                top = 8.dp,
+                end = 16.dp,
+                bottom = screenContentBottomPadding,
+            ),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (results.pages.isNotEmpty()) {
@@ -8085,20 +8104,143 @@ private fun SearchScreen(
 
                 if (results.pages.isEmpty() && results.tasks.isEmpty() && results.queries.isEmpty()) {
                     item {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 32.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                "No results.",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                        SearchNoResultsCard(
+                            query = searchText,
+                            scopeDescription = searchScopeDescription,
+                            onClear = onClear,
+                        )
                     }
                 }
+            }
+        } else if (searchText.isBlank()) {
+            SearchEmptyState(
+                scopeDescription = searchScopeDescription,
+                onSuggestionSelected = onSearchTextChange,
+            )
+        } else {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (uiState.isSearching) "Searching..." else "Keep typing to search.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchEmptyState(
+    scopeDescription: String,
+    onSuggestionSelected: (String) -> Unit,
+) {
+    val suggestions = remember {
+        listOf("meeting", "invoice", "roadmap", "follow up")
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+            shape = RoundedCornerShape(16.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "Search pages, tasks, and queries",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Text(
+                    text = "Results stay inside $scopeDescription and update while you type.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    suggestions.forEach { suggestion ->
+                        AssistChip(
+                            onClick = { onSuggestionSelected(suggestion) },
+                            label = { Text(suggestion) },
+                            leadingIcon = {
+                                Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(16.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = "Good search targets",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Page titles and text, task content, saved query names, and matches inside query descriptions.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchNoResultsCard(
+    query: String,
+    scopeDescription: String,
+    onClear: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "No matches for \"$query\"",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "Nothing matched in $scopeDescription. Try a broader term or switch scope.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(
+                onClick = onClear,
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Text("Clear search")
             }
         }
     }
@@ -8247,6 +8389,7 @@ private fun SettingsScreen(
     var confirmPassword by rememberSaveable { mutableStateOf("") }
     var authActionError by rememberSaveable { mutableStateOf<String?>(null) }
     var isAuthActionBusy by rememberSaveable { mutableStateOf(false) }
+    var showConnectionEditorSheet by rememberSaveable { mutableStateOf(false) }
     var showThemeLibrarySheet by rememberSaveable { mutableStateOf(false) }
     var showVaultEditorSheet by rememberSaveable { mutableStateOf(false) }
     var editingVaultId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -8259,6 +8402,80 @@ private fun SettingsScreen(
         theme.id.equals(selectedThemeId, ignoreCase = true)
     }
     val editingVault = vaults.firstOrNull { vault -> vault.id == editingVaultId }
+    val currentScopeLabel = remember(settings.scopePrefix, vaults) {
+        displayCurrentScopeLabel(settings.scopePrefix, vaults)
+    }
+
+    if (showConnectionEditorSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showConnectionEditorSheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .imePadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "Edit connection",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                AppTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = "Server URL")
+                AppTextField(value = scopePrefix, onValueChange = { scopePrefix = it }, label = "Scope Prefix")
+                AppTextField(value = username, onValueChange = { username = it }, label = "Username")
+                AppTextField(value = password, onValueChange = { password = it }, label = "Password", isPassword = true)
+                AppTextField(value = bearerToken, onValueChange = { bearerToken = it }, label = "Bearer Token", isPassword = true)
+                Text(
+                    text = "Open on startup",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    StartupTab.entries.forEach { option ->
+                        FilterChip(
+                            selected = startupTab == option.wireValue,
+                            onClick = { startupTab = option.wireValue },
+                            label = { Text(option.label) },
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    TextButton(
+                        onClick = { showConnectionEditorSheet = false },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Cancel")
+                    }
+                    Button(
+                        onClick = {
+                            onSave(
+                                serverUrl,
+                                scopePrefix,
+                                username,
+                                password,
+                                bearerToken,
+                                startupTabForValue(startupTab).wireValue,
+                            )
+                            showConnectionEditorSheet = false
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Save")
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
 
     if (showChangePasswordSheet) {
         ModalBottomSheet(
@@ -8431,42 +8648,23 @@ private fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         SettingsSectionCard(title = "Connection") {
-            AppTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = "Server URL")
-            AppTextField(value = scopePrefix, onValueChange = { scopePrefix = it }, label = "Scope Prefix")
-            AppTextField(value = username, onValueChange = { username = it }, label = "Username")
-            AppTextField(value = password, onValueChange = { password = it }, label = "Password", isPassword = true)
-            AppTextField(value = bearerToken, onValueChange = { bearerToken = it }, label = "Bearer Token", isPassword = true)
-            Text(
-                text = "Open on startup",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                StartupTab.entries.forEach { option ->
-                    FilterChip(
-                        selected = startupTab == option.wireValue,
-                        onClick = { startupTab = option.wireValue },
-                        label = { Text(option.label) },
-                    )
-                }
-            }
-            Button(
-                onClick = {
-                    onSave(
-                        serverUrl,
-                        scopePrefix,
-                        username,
-                        password,
-                        bearerToken,
-                        startupTabForValue(startupTab).wireValue,
-                    )
+            SettingsInfoRow("Server", settings.serverUrl.ifBlank { "Not configured" })
+            SettingsInfoRow("Scope", currentScopeLabel)
+            SettingsInfoRow("Username", settings.username.ifBlank { "Not configured" })
+            SettingsInfoRow(
+                "Auth",
+                when {
+                    settings.bearerToken.isNotBlank() -> "Bearer token saved"
+                    settings.password.isNotBlank() -> "Password saved"
+                    else -> "No credentials stored"
                 },
+            )
+            SettingsInfoRow("Open on startup", startupTabForValue(settings.startupTab).label)
+            Button(
+                onClick = { showConnectionEditorSheet = true },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Save")
+                Text(if (settings.serverUrl.isBlank()) "Set up connection" else "Edit connection")
             }
         }
 
