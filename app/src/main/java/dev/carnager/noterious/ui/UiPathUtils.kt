@@ -75,6 +75,18 @@ internal fun displayPagePath(path: String, scopePrefix: String): String {
     return normalizedPath
 }
 
+internal fun pathWithinScope(path: String, scopePrefix: String): Boolean {
+    val normalizedPath = normalizePagePath(path)
+    val normalizedScopePrefix = normalizeScopePrefix(scopePrefix)
+    if (normalizedPath.isBlank()) {
+        return false
+    }
+    if (normalizedScopePrefix.isBlank()) {
+        return true
+    }
+    return normalizedPath == normalizedScopePrefix || normalizedPath.startsWith("$normalizedScopePrefix/")
+}
+
 internal fun applyScopePrefixToPagePath(pagePath: String, scopePrefix: String): String {
     val normalizedPath = normalizePagePath(pagePath)
     val normalizedScopePrefix = normalizeScopePrefix(scopePrefix)

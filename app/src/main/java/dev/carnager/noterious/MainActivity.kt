@@ -6,6 +6,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.carnager.noterious.ui.MainViewModel
 import dev.carnager.noterious.ui.NoteriousApp
 import dev.carnager.noterious.ui.theme.NoteriousTheme
@@ -17,7 +19,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            NoteriousTheme {
+            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            NoteriousTheme(
+                themeId = uiState.settings.themeId,
+                themes = uiState.themes,
+            ) {
                 NoteriousApp(viewModel = viewModel)
             }
         }

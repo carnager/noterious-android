@@ -7,10 +7,23 @@ import dev.carnager.noterious.model.ApiPagesResponse
 import dev.carnager.noterious.model.ApiTaskItem
 import dev.carnager.noterious.model.ApiTasksResponse
 import dev.carnager.noterious.model.DerivedPageResponse
+import dev.carnager.noterious.model.DocumentListResponse
 import dev.carnager.noterious.model.DocumentRecord
+import dev.carnager.noterious.model.FolderListResponse
+import dev.carnager.noterious.model.PageHistoryResponse
+import dev.carnager.noterious.model.QueryCopilotResponse
+import dev.carnager.noterious.model.QueryWorkbenchResult
+import dev.carnager.noterious.model.SavedQueryRecord
 import dev.carnager.noterious.model.SearchResponse
+import dev.carnager.noterious.model.ServerMetaResponse
+import dev.carnager.noterious.model.ServerSettingsResponse
 import dev.carnager.noterious.model.TaskItem
+import dev.carnager.noterious.model.ThemeListResponse
+import dev.carnager.noterious.model.ThemeRecord
 import dev.carnager.noterious.model.TodaySnapshot
+import dev.carnager.noterious.model.TrashListResponse
+import dev.carnager.noterious.model.UserSettingsPayload
+import dev.carnager.noterious.model.UserSettingsResponse
 import dev.carnager.noterious.model.VaultRecord
 import dev.carnager.noterious.model.VaultsResponse
 import kotlinx.coroutines.Dispatchers
@@ -40,10 +53,66 @@ class NoteriousRepository {
         explicitNulls = false
     }
 
+    data class DocumentMoveResult(
+        val document: DocumentRecord,
+        val targetPath: String,
+        val rewrittenPages: List<String>,
+    )
+
     @Serializable
     private data class SavePageRequest(
         val rawMarkdown: String,
         val baseRawMarkdown: String? = null,
+    )
+
+    @Serializable
+    private data class MovePageRequest(
+        val targetPage: String,
+    )
+
+    @Serializable
+    private data class RestorePageHistoryRequest(
+        val revisionId: String,
+    )
+
+    @Serializable
+    private data class MoveDocumentRequest(
+        val targetPath: String,
+    )
+
+    @Serializable
+    private data class CreateFolderRequest(
+        val folder: String,
+    )
+
+    @Serializable
+    private data class MoveFolderRequest(
+        val targetFolder: String = "",
+        val name: String = "",
+    )
+
+    @Serializable
+    private data class QueryWorkbenchRequest(
+        val query: String,
+        val previewLimit: Int,
+    )
+
+    @Serializable
+    private data class QueryCopilotRequest(
+        val intent: String,
+        val currentQuery: String = "",
+        val previewLimit: Int,
+    )
+
+    @Serializable
+    private data class ChangePasswordRequest(
+        val currentPassword: String,
+        val newPassword: String,
+    )
+
+    @Serializable
+    private data class NamedVaultRequest(
+        val name: String,
     )
 
     @Serializable
@@ -64,6 +133,56 @@ class NoteriousRepository {
     private data class FrontmatterPatch(
         val set: JsonObject? = null,
         val remove: List<String> = emptyList(),
+    )
+
+    @Serializable
+    private data class PageDeletedResponse(
+        val ok: Boolean = false,
+        val page: String = "",
+    )
+
+    @Serializable
+    private data class OkResponse(
+        val ok: Boolean = false,
+    )
+
+    @Serializable
+    private data class OkIdResponse(
+        val ok: Boolean = false,
+        val id: String = "",
+    )
+
+    @Serializable
+    private data class CreatedFolderResponse(
+        val folder: String = "",
+    )
+
+    @Serializable
+    private data class MovedFolderResponse(
+        val folder: String = "",
+        val sourceFolder: String = "",
+        val targetFolder: String = "",
+        val name: String = "",
+    )
+
+    @Serializable
+    private data class DeletedFolderResponse(
+        val ok: Boolean = false,
+        val folder: String = "",
+    )
+
+    @Serializable
+    private data class MovedDocumentResponse(
+        val document: DocumentRecord = DocumentRecord(),
+        val sourcePath: String = "",
+        val targetPath: String = "",
+        val rewrittenPages: List<String> = emptyList(),
+    )
+
+    @Serializable
+    private data class DeletedDocumentResponse(
+        val ok: Boolean = false,
+        val path: String = "",
     )
 
     @Volatile
@@ -87,6 +206,220 @@ class NoteriousRepository {
                 performGet(apiEndpointUrl(baseUrl, "user/vaults"), bearerToken, ""),
             ).vaults
         }.getOrDefault(emptyList())
+    }
+
+    suspend fun createVault(
+        url: String,
+        name: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): VaultRecord = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            NamedVaultRequest(
+                name = name.trim(),
+            ),
+        )
+        json.decodeFromString(
+            performRequest(
+                method = "POST",
+                url = apiEndpointUrl(baseUrl, "user/vaults"),
+                bearerToken = bearerToken,
+                scopePrefix = "",
+                requestBody = requestBody,
+            ),
+        )
+    }
+
+    suspend fun renameVault(
+        url: String,
+        vaultId: Long,
+        name: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): VaultRecord = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            NamedVaultRequest(
+                name = name.trim(),
+            ),
+        )
+        json.decodeFromString(
+            performRequest(
+                method = "PUT",
+                url = "${apiEndpointUrl(baseUrl, "user/vaults")}/${vaultId}",
+                bearerToken = bearerToken,
+                scopePrefix = "",
+                requestBody = requestBody,
+            ),
+        )
+    }
+
+    suspend fun fetchServerSettings(
+        url: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ServerSettingsResponse = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString(
+            performGet(apiEndpointUrl(baseUrl, "settings"), bearerToken, ""),
+        )
+    }
+
+    suspend fun fetchUserSettings(
+        url: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): UserSettingsPayload = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<UserSettingsResponse>(
+            performGet(apiEndpointUrl(baseUrl, "user/settings"), bearerToken, ""),
+        ).settings
+    }
+
+    suspend fun saveUserSettings(
+        url: String,
+        settings: UserSettingsPayload,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): UserSettingsPayload = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(UserSettingsResponse(settings = settings))
+        json.decodeFromString<UserSettingsResponse>(
+            performRequest(
+                method = "PUT",
+                url = apiEndpointUrl(baseUrl, "user/settings"),
+                bearerToken = bearerToken,
+                scopePrefix = "",
+                requestBody = requestBody,
+            ),
+        ).settings
+    }
+
+    suspend fun fetchServerMeta(
+        url: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ServerMetaResponse = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString(
+            performGet(apiEndpointUrl(baseUrl, "meta"), bearerToken, ""),
+        )
+    }
+
+    suspend fun fetchThemes(
+        url: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): List<ThemeRecord> = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<ThemeListResponse>(
+            performGet(apiEndpointUrl(baseUrl, "themes"), bearerToken, ""),
+        ).themes
+    }
+
+    suspend fun uploadTheme(
+        url: String,
+        fileName: String,
+        contentType: String,
+        content: ByteArray,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ThemeRecord = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString(
+            performMultipartRequest(
+                url = apiEndpointUrl(baseUrl, "themes"),
+                bearerToken = bearerToken,
+                scopePrefix = "",
+                formFields = emptyMap(),
+                fileFieldName = "file",
+                fileName = fileName,
+                contentType = contentType.ifBlank { "application/json" },
+                fileContent = content,
+            ),
+        )
+    }
+
+    suspend fun deleteTheme(
+        url: String,
+        themeId: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<OkIdResponse>(
+            performRequest(
+                method = "DELETE",
+                url = "${apiEndpointUrl(baseUrl, "themes")}/${encodedPath(themeId)}",
+                bearerToken = bearerToken,
+                scopePrefix = "",
+                requestBody = null,
+            ),
+        ).id
+    }
+
+    suspend fun changePassword(
+        url: String,
+        currentPassword: String,
+        newPassword: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ApiAuthSession = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            ChangePasswordRequest(
+                currentPassword = currentPassword,
+                newPassword = newPassword,
+            ),
+        )
+        json.decodeFromString(
+            performRequest(
+                method = "POST",
+                url = apiEndpointUrl(baseUrl, "auth/change-password"),
+                bearerToken = bearerToken,
+                scopePrefix = "",
+                requestBody = requestBody,
+            ),
+        )
+    }
+
+    suspend fun logout(
+        url: String,
+        bearerToken: String,
+    ) = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        try {
+            performRequest(
+                method = "POST",
+                url = apiEndpointUrl(baseUrl, "auth/logout"),
+                bearerToken = bearerToken,
+                scopePrefix = "",
+                requestBody = null,
+            )
+        } finally {
+            clearCookies()
+        }
     }
 
     suspend fun fetchPages(
@@ -116,6 +449,34 @@ class NoteriousRepository {
             performGet(apiEndpointUrl(baseUrl, "tasks"), bearerToken, scopePrefix),
         ).tasks
         apiTasks.map(::toTaskItem)
+    }
+
+    suspend fun fetchFolders(
+        url: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): List<String> = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<FolderListResponse>(
+            performGet(apiEndpointUrl(baseUrl, "folders"), bearerToken, scopePrefix),
+        ).folders
+    }
+
+    suspend fun fetchDocuments(
+        url: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): List<DocumentRecord> = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<DocumentListResponse>(
+            performGet("${apiEndpointUrl(baseUrl, "documents")}?withUsage=1", bearerToken, scopePrefix),
+        ).documents
     }
 
     suspend fun fetchPageDetail(
@@ -175,6 +536,354 @@ class NoteriousRepository {
                 requestBody = requestBody,
             ),
         )
+    }
+
+    suspend fun createPage(
+        url: String,
+        pagePath: String,
+        rawMarkdown: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ApiPageDetail = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            SavePageRequest(
+                rawMarkdown = rawMarkdown,
+            ),
+        )
+        json.decodeFromString<ApiPageDetail>(
+            performRequest(
+                method = "PUT",
+                url = pageUrl(baseUrl, pagePath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
+            ),
+        )
+    }
+
+    suspend fun movePage(
+        url: String,
+        pagePath: String,
+        targetPage: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ApiPageDetail = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            MovePageRequest(
+                targetPage = targetPage,
+            ),
+        )
+        json.decodeFromString<ApiPageDetail>(
+            performRequest(
+                method = "POST",
+                url = "${pageUrl(baseUrl, pagePath)}/move",
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
+            ),
+        )
+    }
+
+    suspend fun deletePage(
+        url: String,
+        pagePath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<PageDeletedResponse>(
+            performRequest(
+                method = "DELETE",
+                url = pageUrl(baseUrl, pagePath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = null,
+            ),
+        ).page
+    }
+
+    suspend fun createFolder(
+        url: String,
+        folderPath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            CreateFolderRequest(
+                folder = folderPath,
+            ),
+        )
+        json.decodeFromString<CreatedFolderResponse>(
+            performRequest(
+                method = "POST",
+                url = apiEndpointUrl(baseUrl, "folders"),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
+            ),
+        ).folder
+    }
+
+    suspend fun moveFolder(
+        url: String,
+        folderPath: String,
+        targetFolderPath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val normalizedTargetFolderPath = targetFolderPath.trim().trim('/').split('/')
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .joinToString("/")
+        val targetParentFolder = normalizedTargetFolderPath.substringBeforeLast('/', "")
+        val targetName = normalizedTargetFolderPath.substringAfterLast('/', normalizedTargetFolderPath)
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            MoveFolderRequest(
+                targetFolder = targetParentFolder,
+                name = targetName,
+            ),
+        )
+        json.decodeFromString<MovedFolderResponse>(
+            performRequest(
+                method = "POST",
+                url = "${folderUrl(baseUrl, folderPath)}/move",
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
+            ),
+        ).folder
+    }
+
+    suspend fun deleteFolder(
+        url: String,
+        folderPath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<DeletedFolderResponse>(
+            performRequest(
+                method = "DELETE",
+                url = folderUrl(baseUrl, folderPath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = null,
+            ),
+        ).folder
+    }
+
+    suspend fun moveDocument(
+        url: String,
+        documentPath: String,
+        targetPath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): DocumentMoveResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            MoveDocumentRequest(
+                targetPath = targetPath,
+            ),
+        )
+        val response = json.decodeFromString<MovedDocumentResponse>(
+            performRequest(
+                method = "POST",
+                url = documentMoveUrl(baseUrl, documentPath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
+            ),
+        )
+        DocumentMoveResult(
+            document = response.document,
+            targetPath = response.targetPath.ifBlank { targetPath },
+            rewrittenPages = response.rewrittenPages,
+        )
+    }
+
+    suspend fun deleteDocument(
+        url: String,
+        documentPath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<DeletedDocumentResponse>(
+            performRequest(
+                method = "DELETE",
+                url = documentUrl(baseUrl, documentPath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = null,
+            ),
+        ).path
+    }
+
+    suspend fun fetchPageHistory(
+        url: String,
+        pagePath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): PageHistoryResponse = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<PageHistoryResponse>(
+            performGet(pageHistoryUrl(baseUrl, pagePath), bearerToken, scopePrefix),
+        )
+    }
+
+    suspend fun restorePageHistory(
+        url: String,
+        pagePath: String,
+        revisionId: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ApiPageDetail = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            RestorePageHistoryRequest(
+                revisionId = revisionId,
+            ),
+        )
+        json.decodeFromString<ApiPageDetail>(
+            performRequest(
+                method = "POST",
+                url = "${pageHistoryUrl(baseUrl, pagePath)}/restore",
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
+            ),
+        )
+    }
+
+    suspend fun deletePageHistory(
+        url: String,
+        pagePath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<PageDeletedResponse>(
+            performRequest(
+                method = "DELETE",
+                url = pageHistoryUrl(baseUrl, pagePath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = null,
+            ),
+        ).page
+    }
+
+    suspend fun fetchTrashPages(
+        url: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): TrashListResponse = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<TrashListResponse>(
+            performGet(apiEndpointUrl(baseUrl, "trash/pages"), bearerToken, scopePrefix),
+        )
+    }
+
+    suspend fun restoreTrashPage(
+        url: String,
+        pagePath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): ApiPageDetail = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<ApiPageDetail>(
+            performRequest(
+                method = "POST",
+                url = "${trashPageUrl(baseUrl, pagePath)}/restore",
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = null,
+            ),
+        )
+    }
+
+    suspend fun permanentlyDeleteTrashPage(
+        url: String,
+        pagePath: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<PageDeletedResponse>(
+            performRequest(
+                method = "DELETE",
+                url = trashPageUrl(baseUrl, pagePath),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = null,
+            ),
+        ).page
+    }
+
+    suspend fun emptyTrash(
+        url: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<OkResponse>(
+            performRequest(
+                method = "DELETE",
+                url = apiEndpointUrl(baseUrl, "trash/pages"),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = null,
+            ),
+        ).ok
     }
 
     suspend fun uploadDocument(
@@ -319,6 +1028,92 @@ class NoteriousRepository {
                 scopePrefix,
             ),
         )
+    }
+
+    suspend fun fetchSavedQuery(
+        url: String,
+        name: String,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): SavedQueryRecord = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        json.decodeFromString<SavedQueryRecord>(
+            performGet(
+                savedQueryUrl(baseUrl, name),
+                bearerToken,
+                scopePrefix,
+            ),
+        )
+    }
+
+    suspend fun runQueryWorkbench(
+        url: String,
+        query: String,
+        previewLimit: Int,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): QueryWorkbenchResult = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            QueryWorkbenchRequest(
+                query = query,
+                previewLimit = previewLimit,
+            ),
+        )
+        json.decodeFromString<QueryWorkbenchResult>(
+            performRequest(
+                method = "POST",
+                url = queryWorkbenchUrl(baseUrl),
+                bearerToken = bearerToken,
+                scopePrefix = scopePrefix,
+                requestBody = requestBody,
+            ),
+        )
+    }
+
+    suspend fun generateQueryCopilot(
+        url: String,
+        intent: String,
+        currentQuery: String,
+        previewLimit: Int,
+        scopePrefix: String,
+        bearerToken: String,
+        username: String,
+        password: String,
+    ): QueryCopilotResponse = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeBaseUrl(url)
+        ensureAuthenticated(baseUrl, bearerToken, username, password)
+        val requestBody = json.encodeToString(
+            QueryCopilotRequest(
+                intent = intent,
+                currentQuery = currentQuery,
+                previewLimit = previewLimit,
+            ),
+        )
+        try {
+            json.decodeFromString<QueryCopilotResponse>(
+                performRequest(
+                    method = "POST",
+                    url = queryCopilotUrl(baseUrl),
+                    bearerToken = bearerToken,
+                    scopePrefix = scopePrefix,
+                    requestBody = requestBody,
+                    readTimeoutMs = 90_000,
+                ),
+            )
+        } catch (error: IllegalStateException) {
+            val bodyMessage = error.message
+                ?.substringAfterLast(": ")
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+            throw IllegalStateException(bodyMessage ?: error.message ?: "AI query generation failed.")
+        }
     }
 
     suspend fun consumeEvents(
@@ -580,11 +1375,12 @@ class NoteriousRepository {
         bearerToken: String,
         scopePrefix: String,
         requestBody: String?,
+        readTimeoutMs: Int = 10_000,
     ): String {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 10_000
-            readTimeout = 10_000
+            readTimeout = readTimeoutMs
             setRequestProperty("Accept", "application/json")
             doOutput = requestBody != null
             if (bearerToken.isNotBlank()) {
@@ -687,10 +1483,45 @@ class NoteriousRepository {
     }
 
     private fun pageUrl(baseUrl: String, pagePath: String): String {
-        val encodedPath = pagePath.trim().split("/").joinToString("/") { segment ->
+        return "${apiEndpointUrl(baseUrl, "pages")}/${encodedPath(pagePath)}"
+    }
+
+    private fun folderUrl(baseUrl: String, folderPath: String): String {
+        return "${apiEndpointUrl(baseUrl, "folders")}/${encodedPath(folderPath)}"
+    }
+
+    private fun documentUrl(baseUrl: String, documentPath: String): String {
+        return "${apiEndpointUrl(baseUrl, "documents")}/${encodedPath(documentPath)}"
+    }
+
+    private fun documentMoveUrl(baseUrl: String, documentPath: String): String {
+        return "${apiEndpointUrl(baseUrl, "documents/move")}/${encodedPath(documentPath)}"
+    }
+
+    private fun pageHistoryUrl(baseUrl: String, pagePath: String): String {
+        return "${apiEndpointUrl(baseUrl, "page-history")}/${encodedPath(pagePath)}"
+    }
+
+    private fun trashPageUrl(baseUrl: String, pagePath: String): String {
+        return "${apiEndpointUrl(baseUrl, "trash/pages")}/${encodedPath(pagePath)}"
+    }
+
+    private fun queryWorkbenchUrl(baseUrl: String): String {
+        return apiEndpointUrl(baseUrl, "query/workbench")
+    }
+
+    private fun savedQueryUrl(baseUrl: String, name: String): String {
+        return "${apiEndpointUrl(baseUrl, "queries")}/${encodedPath(name)}"
+    }
+
+    private fun queryCopilotUrl(baseUrl: String): String {
+        return apiEndpointUrl(baseUrl, "query/copilot")
+    }
+
+    private fun encodedPath(value: String): String {
+        return value.trim().split("/").joinToString("/") { segment ->
             URLEncoder.encode(segment, Charsets.UTF_8.name()).replace("+", "%20")
         }
-        return "${apiEndpointUrl(baseUrl, "pages")}/$encodedPath"
     }
 
     private fun taskUrl(baseUrl: String, taskRef: String): String {

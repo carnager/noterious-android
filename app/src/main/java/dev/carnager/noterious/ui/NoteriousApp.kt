@@ -26,6 +26,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -49,16 +50,19 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AlarmOff
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -119,11 +123,21 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.carnager.noterious.model.ApiPageSummary
 import dev.carnager.noterious.model.ApiTaskItem
+import dev.carnager.noterious.model.BacklinkRecord
 import dev.carnager.noterious.model.DerivedPageResponse
 import dev.carnager.noterious.model.DocumentRecord
+import dev.carnager.noterious.model.PageRevisionRecord
 import dev.carnager.noterious.model.QueryBlock
+import dev.carnager.noterious.model.QueryCopilotResponse
+import dev.carnager.noterious.model.QueryResult
+import dev.carnager.noterious.model.QueryWorkbenchResult
 import dev.carnager.noterious.model.SearchTaskResult
+import dev.carnager.noterious.model.ServerMetaResponse
+import dev.carnager.noterious.model.ServerSettingsResponse
 import dev.carnager.noterious.model.TaskItem
+import dev.carnager.noterious.model.ThemeRecord
+import dev.carnager.noterious.model.TrashPageRecord
+import dev.carnager.noterious.model.UserSettingsPayload
 import dev.carnager.noterious.model.VaultRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -135,15 +149,28 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.io.File
 import java.util.Locale
 
-private enum class Tab { Home, Browse, Tasks, Search, Settings }
+private enum class Tab { Pages, Tasks, Search, Settings }
+
+private enum class StartupTab(val wireValue: String, val label: String, val tab: Tab) {
+    Pages("pages", "Pages", Tab.Pages),
+    Tasks("tasks", "Tasks", Tab.Tasks),
+}
+
+private fun startupTabForValue(value: String?): StartupTab {
+    return StartupTab.entries.firstOrNull { tab ->
+        tab.wireValue.equals(value.orEmpty().trim(), ignoreCase = true)
+    } ?: StartupTab.Pages
+}
 
 private enum class TaskListFilter(val label: String) {
     Open("Open"),
@@ -239,6 +266,11 @@ private data class ImageDownloadPayload(
     val mimeType: String,
 )
 
+private data class TextDocumentExport(
+    val suggestedName: String,
+    val content: String,
+)
+
 private val rootFabContentBottomPadding = 104.dp
 
 private data class TaskResultCardModel(
@@ -258,7 +290,11 @@ private data class TaskResultCardModel(
 @Composable
 fun NoteriousApp(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    var selectedTab by rememberSaveable { mutableStateOf(Tab.Home) }
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val coroutineScope = rememberCoroutineScope()
+    var selectedTab by rememberSaveable { mutableStateOf(Tab.Pages) }
+    var appliedStartupTab by rememberSaveable { mutableStateOf<String?>(null) }
     var browseCurrentFolder by rememberSaveable { mutableStateOf("") }
     var browseTagFilter by rememberSaveable { mutableStateOf("") }
     var tasksFilterText by rememberSaveable { mutableStateOf("") }
@@ -268,6 +304,45 @@ fun NoteriousApp(viewModel: MainViewModel) {
     var showSlashMenu by remember { mutableStateOf(false) }
     var showCommandPalette by remember { mutableStateOf(false) }
     var showScopePicker by remember { mutableStateOf(false) }
+    var showTrashSheet by remember { mutableStateOf(false) }
+    var showDocumentsSheet by remember { mutableStateOf(false) }
+    var showQuerySheet by remember { mutableStateOf(false) }
+    var queryWorkbenchDraft by rememberSaveable { mutableStateOf("") }
+    var pendingTextExport by remember { mutableStateOf<TextDocumentExport?>(null) }
+
+    val uploadThemeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) {
+            return@rememberLauncherForActivityResult
+        }
+        viewModel.uploadTheme(uri) { theme ->
+            if (theme == null) {
+                return@uploadTheme
+            }
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("Theme \"${theme.name.ifBlank { theme.id }}\" uploaded.")
+            }
+        }
+    }
+    val exportDocumentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        val export = pendingTextExport
+        pendingTextExport = null
+        if (uri == null || export == null) {
+            return@rememberLauncherForActivityResult
+        }
+        coroutineScope.launch {
+            val message = runCatching {
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
+                        writer.write(export.content)
+                    } ?: error("Document could not be created.")
+                }
+                "\"${export.suggestedName}\" saved."
+            }.getOrElse { error ->
+                error.message ?: "Document could not be saved."
+            }
+            snackbarHostState.showSnackbar(message)
+        }
+    }
 
     LaunchedEffect(uiState.error) {
         if (uiState.openPagePath == null) {
@@ -275,6 +350,35 @@ fun NoteriousApp(viewModel: MainViewModel) {
                 snackbarHostState.showSnackbar(msg)
                 viewModel.clearError()
             }
+        }
+    }
+
+    LaunchedEffect(uiState.settingsLoaded, uiState.settings.startupTab) {
+        if (!uiState.settingsLoaded) {
+            return@LaunchedEffect
+        }
+        val startupTab = startupTabForValue(uiState.settings.startupTab)
+        if (appliedStartupTab == null) {
+            selectedTab = startupTab.tab
+        }
+        appliedStartupTab = startupTab.wireValue
+    }
+
+    LaunchedEffect(
+        uiState.settingsLoaded,
+        uiState.settings.serverUrl,
+        uiState.settings.username,
+        uiState.settings.password,
+        uiState.settings.bearerToken,
+    ) {
+        if (uiState.settingsLoaded) {
+            viewModel.ensureThemeLibraryLoaded()
+        }
+    }
+
+    LaunchedEffect(selectedTab) {
+        if (selectedTab == Tab.Settings) {
+            viewModel.ensureSettingsDetailsLoaded()
         }
     }
 
@@ -291,16 +395,110 @@ fun NoteriousApp(viewModel: MainViewModel) {
             onDismiss = { showSlashMenu = false },
             onOpenPage = {
                 showSlashMenu = false
+                viewModel.ensureTemplatePagesLoaded()
                 showCommandPalette = true
             },
             onOpenDocument = {
-                navigateToTab(Tab.Browse)
+                showSlashMenu = false
+                viewModel.fetchDocuments()
+                showDocumentsSheet = true
             },
             onSearch = {
                 navigateToTab(Tab.Search)
             },
+            onRunQuery = {
+                showSlashMenu = false
+                showQuerySheet = true
+            },
+            onOpenTrash = {
+                showSlashMenu = false
+                viewModel.fetchTrashPages()
+                showTrashSheet = true
+            },
             onSettings = {
                 navigateToTab(Tab.Settings)
+            },
+        )
+    }
+
+    if (showTrashSheet) {
+        TrashSheet(
+            pages = uiState.trashPages,
+            scopePrefix = uiState.settings.scopePrefix,
+            isLoading = uiState.isTrashLoading,
+            isBusy = uiState.isTrashBusy,
+            onDismiss = {
+                if (!uiState.isTrashBusy) {
+                    showTrashSheet = false
+                }
+            },
+            onRefresh = { viewModel.fetchTrashPages() },
+            onRestore = { pagePath ->
+                viewModel.restoreTrashPage(pagePath) { success ->
+                    if (success) {
+                        showTrashSheet = false
+                    }
+                }
+            },
+            onDelete = { pagePath ->
+                viewModel.permanentlyDeleteTrashPage(pagePath)
+            },
+            onEmptyTrash = {
+                viewModel.emptyTrash()
+            },
+        )
+    }
+
+    if (showDocumentsSheet) {
+        DocumentLibrarySheet(
+            documents = uiState.documents,
+            scopePrefix = uiState.settings.scopePrefix,
+            isLoading = uiState.isDocumentsLoading,
+            isBusy = uiState.isDocumentsBusy,
+            onDismiss = {
+                if (!uiState.isDocumentsBusy) {
+                    showDocumentsSheet = false
+                }
+            },
+            onRefresh = { viewModel.fetchDocuments() },
+            onOpenDocument = { documentPath ->
+                val url = documentDownloadUrl(uiState.settings.serverUrl, documentPath)
+                if (url.isNotBlank()) {
+                    uriHandler.openUri(url)
+                }
+            },
+            onRenameDocument = { documentPath, nextDocumentPath, onResult ->
+                viewModel.moveDocument(documentPath, nextDocumentPath, onResult)
+            },
+            onDeleteDocument = { documentPath, onResult ->
+                viewModel.deleteDocument(documentPath, onResult)
+            },
+        )
+    }
+
+    if (showQuerySheet) {
+        QueryWorkbenchSheet(
+            queryText = queryWorkbenchDraft,
+            executedQuery = uiState.lastExecutedQuery,
+            workbench = uiState.queryWorkbench,
+            scopePrefix = uiState.settings.scopePrefix,
+            isRunning = uiState.isQueryWorkbenchLoading,
+            onDismiss = {
+                if (!uiState.isQueryWorkbenchLoading) {
+                    showQuerySheet = false
+                }
+            },
+            onQueryTextChange = { queryWorkbenchDraft = it },
+            onRun = {
+                viewModel.runQueryWorkbench(queryWorkbenchDraft)
+            },
+            onClear = {
+                queryWorkbenchDraft = ""
+                viewModel.clearQueryWorkbench()
+            },
+            onOpenPage = { pagePath ->
+                showQuerySheet = false
+                viewModel.openPage(pagePath)
             },
         )
     }
@@ -309,10 +507,19 @@ fun NoteriousApp(viewModel: MainViewModel) {
     if (showCommandPalette) {
         CommandPaletteSheet(
             pages = uiState.pages,
+            templatePages = if (uiState.templatePages.isEmpty()) uiState.pages else uiState.templatePages,
             scopePrefix = uiState.settings.scopePrefix,
             onOpenPage = {
                 showCommandPalette = false
                 viewModel.openPage(it)
+            },
+            onCreatePage = {
+                showCommandPalette = false
+                viewModel.createPage(it)
+            },
+            onCreateTemplatePage = { template, pagePath ->
+                showCommandPalette = false
+                viewModel.createPageFromTemplate(template, pagePath)
             },
             onDismiss = { showCommandPalette = false },
         )
@@ -325,15 +532,31 @@ fun NoteriousApp(viewModel: MainViewModel) {
             frontmatter = uiState.openPageFrontmatter,
             pageTasks = uiState.openPageTasks,
             derived = uiState.openPageDerived,
+            pageHistory = uiState.openPageHistory,
             settings = uiState.settings,
             error = uiState.error,
             isLoading = uiState.isPageLoading,
             isSaving = uiState.isPageSaving,
+            isPageHistoryLoading = uiState.isPageHistoryLoading,
+            isPageHistoryBusy = uiState.isPageHistoryBusy,
             onBack = { viewModel.closePage() },
             onOpenPage = { viewModel.openPage(it) },
             onClearError = { viewModel.clearError() },
             onSavePage = { markdown, baseMarkdown, onResult ->
                 viewModel.saveOpenPage(markdown, baseMarkdown, onResult)
+            },
+            onRenamePage = { nextPagePath, onResult ->
+                viewModel.renameOpenPage(nextPagePath, onResult)
+            },
+            onDeletePage = { onResult ->
+                viewModel.deleteOpenPage(onResult)
+            },
+            onLoadPageHistory = { viewModel.fetchOpenPageHistory() },
+            onRestorePageHistory = { revisionId, onResult ->
+                viewModel.restoreOpenPageHistory(revisionId, onResult)
+            },
+            onPurgePageHistory = { onResult ->
+                viewModel.purgeOpenPageHistory(onResult)
             },
             onShowGlobalMenu = { showSlashMenu = true },
             onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
@@ -356,6 +579,9 @@ fun NoteriousApp(viewModel: MainViewModel) {
             },
             onUploadDocument = { uri, onResult ->
                 viewModel.uploadDocumentForOpenPage(uri, onResult)
+            },
+            onGenerateQueryCopilot = { intent, onResult ->
+                viewModel.generateQueryCopilot(intent, onResult = onResult)
             },
         )
         return
@@ -396,7 +622,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                             )
                             Icon(
                                 Icons.Default.ArrowDropDown,
-                                contentDescription = "Scope waehlen",
+                                contentDescription = "Choose scope",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(16.dp),
                             )
@@ -417,7 +643,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         Spacer(Modifier.width(8.dp))
                     }
                     IconButton(onClick = { viewModel.refresh() }) {
-                        Icon(Icons.Default.Sync, contentDescription = "Aktualisieren")
+                        Icon(Icons.Default.Sync, contentDescription = "Refresh")
                     }
                 },
             )
@@ -425,16 +651,10 @@ fun NoteriousApp(viewModel: MainViewModel) {
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
-                    selected = selectedTab == Tab.Home,
-                    onClick = { selectedTab = Tab.Home },
-                    icon = { Icon(Icons.Default.Home, contentDescription = null) },
-                    label = { Text("Home") },
-                )
-                NavigationBarItem(
-                    selected = selectedTab == Tab.Browse,
-                    onClick = { selectedTab = Tab.Browse },
+                    selected = selectedTab == Tab.Pages,
+                    onClick = { selectedTab = Tab.Pages },
                     icon = { Icon(Icons.Default.Folder, contentDescription = null) },
-                    label = { Text("Browse") },
+                    label = { Text("Pages") },
                 )
                 NavigationBarItem(
                     selected = selectedTab == Tab.Tasks,
@@ -481,32 +701,33 @@ fun NoteriousApp(viewModel: MainViewModel) {
                 label = "tab",
             ) { tab ->
                 when (tab) {
-                    Tab.Home -> HomeScreen(
-                        uiState = uiState,
-                        onOpenPage = { viewModel.openPage(it) },
-                        onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
-                            viewModel.patchTask(
-                                taskRef = taskRef,
-                                text = text,
-                                state = state,
-                                due = due,
-                                remind = remind,
-                                click = click,
-                                onResult = onResult,
-                            )
-                        },
-                        onDeleteTask = { taskRef, onResult ->
-                            viewModel.deleteTask(taskRef, onResult)
-                        },
-                    )
-                    Tab.Browse -> BrowseScreen(
+                    Tab.Pages -> BrowseScreen(
                         pages = uiState.pages,
+                        folders = uiState.folders,
                         scopePrefix = uiState.settings.scopePrefix,
                         currentFolder = browseCurrentFolder,
                         selectedTag = browseTagFilter,
                         onCurrentFolderChange = { browseCurrentFolder = it },
                         onSelectedTagChange = { browseTagFilter = it },
                         onOpenPage = { viewModel.openPage(it) },
+                        onCreatePage = { pagePath, onResult ->
+                            viewModel.createPage(pagePath, onResult = onResult)
+                        },
+                        onCreateFolder = { folderPath, onResult ->
+                            viewModel.createFolder(folderPath, onResult)
+                        },
+                        onRenamePage = { pagePath, nextPagePath, onResult ->
+                            viewModel.renamePage(pagePath, nextPagePath, onResult)
+                        },
+                        onDeletePage = { pagePath, onResult ->
+                            viewModel.deletePage(pagePath, onResult)
+                        },
+                        onRenameFolder = { folderPath, nextFolderPath, onResult ->
+                            viewModel.renameFolder(folderPath, nextFolderPath, onResult)
+                        },
+                        onDeleteFolder = { folderPath, onResult ->
+                            viewModel.deleteFolder(folderPath, onResult)
+                        },
                     )
                     Tab.Tasks -> TasksScreen(
                         tasks = uiState.tasks,
@@ -548,6 +769,17 @@ fun NoteriousApp(viewModel: MainViewModel) {
                             viewModel.clearSearch()
                         },
                         onOpenPage = { viewModel.openPage(it) },
+                        onOpenQuery = { queryName ->
+                            viewModel.loadSavedQuery(queryName) { savedQuery ->
+                                val queryText = savedQuery?.query?.trim().orEmpty()
+                                if (queryText.isBlank()) {
+                                    return@loadSavedQuery
+                                }
+                                queryWorkbenchDraft = queryText
+                                showQuerySheet = true
+                                viewModel.runQueryWorkbench(queryText)
+                            }
+                        },
                         onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
                             viewModel.patchTask(
                                 taskRef = taskRef,
@@ -565,8 +797,72 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     )
                     Tab.Settings -> SettingsScreen(
                         settings = uiState.settings,
-                        onSave = { url, scope, user, pass, token ->
-                            viewModel.saveSettings(url, scope, user, pass, token)
+                        vaults = uiState.vaults,
+                        userSettings = uiState.userSettings,
+                        serverSettings = uiState.serverSettings,
+                        serverMeta = uiState.serverMeta,
+                        themes = uiState.themes,
+                        isDetailsLoading = uiState.isSettingsDetailsLoading,
+                        isThemesLoading = uiState.isThemesLoading,
+                        isThemeBusy = uiState.isThemeBusy,
+                        isVaultBusy = uiState.isLoading,
+                        isUserSettingsSaving = uiState.isUserSettingsSaving,
+                        onSave = { url, scope, user, pass, token, startupTab ->
+                            viewModel.saveSettings(url, scope, user, pass, token, startupTab)
+                        },
+                        onRefreshDetails = {
+                            viewModel.ensureSettingsDetailsLoaded(force = true)
+                        },
+                        onRefreshThemes = {
+                            viewModel.ensureThemeLibraryLoaded(force = true)
+                        },
+                        onSaveThemeSelection = { themeId ->
+                            viewModel.saveThemeSelection(themeId)
+                        },
+                        onUploadTheme = {
+                            uploadThemeLauncher.launch("application/json")
+                        },
+                        onDeleteTheme = { themeId, onResult ->
+                            viewModel.deleteTheme(themeId, onResult)
+                        },
+                        onRefreshVaults = {
+                            viewModel.fetchVaults()
+                        },
+                        onCreateVault = { name, onResult ->
+                            viewModel.createVault(name, onResult)
+                        },
+                        onRenameVault = { vault, nextName, onResult ->
+                            viewModel.renameVault(vault, nextName, onResult)
+                        },
+                        onSelectVault = { vault ->
+                            viewModel.selectVault(vault)
+                        },
+                        onExportBackupManifest = {
+                            uiState.serverMeta?.let { meta ->
+                                pendingTextExport = TextDocumentExport(
+                                    suggestedName = backupManifestFilename(meta),
+                                    content = buildBackupManifest(meta),
+                                )
+                                exportDocumentLauncher.launch(backupManifestFilename(meta))
+                            }
+                        },
+                        onExportBackupScript = {
+                            uiState.serverMeta?.let { meta ->
+                                pendingTextExport = TextDocumentExport(
+                                    suggestedName = backupScriptFilename(meta),
+                                    content = buildBackupScript(meta),
+                                )
+                                exportDocumentLauncher.launch(backupScriptFilename(meta))
+                            }
+                        },
+                        onSaveUserSettings = { topicUrl, token, onResult ->
+                            viewModel.saveUserNotificationSettings(topicUrl, token, onResult)
+                        },
+                        onChangePassword = { currentPassword, newPassword, onResult ->
+                            viewModel.changePassword(currentPassword, newPassword, onResult)
+                        },
+                        onLogout = { onResult ->
+                            viewModel.logout(onResult)
                         },
                     )
                 }
@@ -587,6 +883,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     username = uiState.settings.username,
                     password = uiState.settings.password,
                     bearerToken = uiState.settings.bearerToken,
+                    startupTab = uiState.settings.startupTab,
                 )
             },
             onSelectVault = { vault ->
@@ -725,6 +1022,8 @@ private fun SlashMenuSheet(
     onOpenPage: () -> Unit,
     onOpenDocument: () -> Unit,
     onSearch: () -> Unit,
+    onRunQuery: () -> Unit,
+    onOpenTrash: () -> Unit,
     onSettings: () -> Unit,
 ) {
     ModalBottomSheet(
@@ -735,6 +1034,8 @@ private fun SlashMenuSheet(
             SlashMenuItem(icon = Icons.Default.Description, label = "Open Page", onClick = onOpenPage)
             SlashMenuItem(icon = Icons.Default.FolderOpen, label = "Open Document", onClick = onOpenDocument)
             SlashMenuItem(icon = Icons.Default.Search, label = "Search", onClick = onSearch)
+            SlashMenuItem(icon = Icons.Default.Tune, label = "Run Query", onClick = onRunQuery)
+            SlashMenuItem(icon = Icons.Default.Delete, label = "Trash", onClick = onOpenTrash)
             SlashMenuItem(icon = Icons.Default.Settings, label = "Settings", onClick = onSettings)
             Spacer(Modifier.height(16.dp))
         }
@@ -763,17 +1064,220 @@ private fun SlashMenuItem(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QueryWorkbenchSheet(
+    queryText: String,
+    executedQuery: String,
+    workbench: QueryWorkbenchResult?,
+    scopePrefix: String,
+    isRunning: Boolean,
+    onDismiss: () -> Unit,
+    onQueryTextChange: (String) -> Unit,
+    onRun: () -> Unit,
+    onClear: () -> Unit,
+    onOpenPage: (String) -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var queryValue by remember {
+        mutableStateOf(
+            TextFieldValue(
+                text = queryText,
+                selection = androidx.compose.ui.text.TextRange(queryText.length),
+            ),
+        )
+    }
+    val previewBlock = remember(workbench) { workbench?.let(::queryWorkbenchPreviewBlock) }
+    val preview = workbench?.preview
+    val hasDraftChanges = remember(queryText, executedQuery) {
+        executedQuery.isNotBlank() && queryText.trim() != executedQuery.trim()
+    }
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+        if (queryText.isBlank()) {
+            keyboardController?.show()
+        }
+    }
+
+    LaunchedEffect(queryText) {
+        if (queryText != queryValue.text) {
+            queryValue = TextFieldValue(
+                text = queryText,
+                selection = androidx.compose.ui.text.TextRange(queryText.length),
+            )
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .imePadding()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Run query",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "Define a query and preview the matching rows in the current scope.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = queryValue,
+                onValueChange = {
+                    queryValue = it
+                    onQueryTextChange(it.text)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                enabled = !isRunning,
+                label = { Text("Query") },
+                placeholder = { Text("pages where ...") },
+                minLines = 4,
+                maxLines = 8,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(
+                    onClick = onClear,
+                    enabled = !isRunning && (queryText.isNotBlank() || workbench != null),
+                ) {
+                    Text("Clear")
+                }
+                Button(
+                    onClick = {
+                        keyboardController?.hide()
+                        onRun()
+                    },
+                    enabled = !isRunning && queryText.isNotBlank(),
+                ) {
+                    if (isRunning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Run")
+                    }
+                }
+            }
+            if (isRunning) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            if (hasDraftChanges) {
+                Text(
+                    text = "Draft changed. Run again to refresh the preview.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            when {
+                previewBlock != null -> {
+                    QueryBlockCard(
+                        block = previewBlock,
+                        scopePrefix = scopePrefix,
+                        onLinkClick = onOpenPage,
+                        onEditQuery = null,
+                        onLongPress = null,
+                    )
+                    if (preview?.valid == true && preview.truncated) {
+                        Text(
+                            text = "Showing ${preview.rows.size} of ${preview.count} results.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                workbench != null && !isRunning -> {
+                    Text(
+                        text = queryWorkbenchFallbackMessage(workbench),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isRunning) {
+                    Text("Close")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
 // ─── Command Palette ────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CommandPaletteSheet(
     pages: List<ApiPageSummary>,
+    templatePages: List<ApiPageSummary>,
     scopePrefix: String,
     onOpenPage: (String) -> Unit,
+    onCreatePage: (String) -> Unit,
+    onCreateTemplatePage: (NoteTemplate, String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val normalizedDraftPath = remember(query) { normalizePagePath(query) }
+    val scopedDraftPath = remember(normalizedDraftPath, scopePrefix) {
+        applyScopePrefixToPagePath(normalizedDraftPath, scopePrefix)
+    }
+    val exactMatch = remember(pages, scopedDraftPath) {
+        scopedDraftPath.isNotBlank() && pages.any {
+            normalizePagePath(it.path).equals(scopedDraftPath, ignoreCase = true)
+        }
+    }
+    val exactMatchPage = remember(pages, scopedDraftPath) {
+        pages.firstOrNull {
+            normalizePagePath(it.path).equals(scopedDraftPath, ignoreCase = true)
+        }
+    }
+    val createTargetLabel = remember(scopedDraftPath, scopePrefix) {
+        displayPagePath(scopedDraftPath, scopePrefix).ifBlank { scopedDraftPath }
+    }
+    val templates = remember(templatePages, scopePrefix) {
+        noteTemplatesFromPages(templatePages, scopePrefix)
+    }
+    val templateEntries = remember(templates, normalizedDraftPath, pages, scopePrefix) {
+        if (normalizedDraftPath.isBlank()) {
+            emptyList()
+        } else {
+            templates.mapNotNull { template ->
+                val targetPath = buildPagePathFromTemplate(template, normalizedDraftPath)
+                val scopedTargetPath = applyScopePrefixToPagePath(targetPath, scopePrefix)
+                if (
+                    targetPath.isBlank() ||
+                    scopedTargetPath.isBlank() ||
+                    pages.any { page ->
+                        normalizePagePath(page.path).equals(scopedTargetPath, ignoreCase = true)
+                    }
+                ) {
+                    null
+                } else {
+                    Triple(template, targetPath, scopedTargetPath)
+                }
+            }
+        }
+    }
     val filtered = remember(pages, query) {
         if (query.isBlank()) {
             pages.sortedByDescending { it.updatedAt }.take(30)
@@ -781,6 +1285,13 @@ private fun CommandPaletteSheet(
             val lower = query.lowercase()
             pages.filter { it.path.lowercase().contains(lower) || it.title.lowercase().contains(lower) }
                 .take(50)
+        }
+    }
+    fun submitSelection() {
+        keyboardController?.hide()
+        when {
+            exactMatchPage != null -> onOpenPage(exactMatchPage.path)
+            normalizedDraftPath.isNotBlank() -> onCreatePage(normalizedDraftPath)
         }
     }
 
@@ -793,8 +1304,10 @@ private fun CommandPaletteSheet(
                 value = query,
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Open page...") },
+                placeholder = { Text("Open or create note...") },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { submitSelection() }),
                 trailingIcon = {
                     if (query.isNotEmpty()) {
                         IconButton(onClick = { query = "" }) {
@@ -808,6 +1321,87 @@ private fun CommandPaletteSheet(
                 modifier = Modifier.height(400.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
+                if (normalizedDraftPath.isNotBlank() && !exactMatch) {
+                    item(key = "create:$scopedDraftPath") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { submitSelection() }
+                                .padding(vertical = 10.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Create note",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = createTargetLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+                items(
+                    items = templateEntries,
+                    key = { (template, targetPath, _) -> "template:${template.id}:$targetPath" },
+                ) { (template, targetPath, scopedTargetPath) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                keyboardController?.hide()
+                                onCreateTemplatePage(template, targetPath)
+                            }
+                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Create ${template.name}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = displayPagePath(scopedTargetPath, scopePrefix).ifBlank { scopedTargetPath },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = templateFieldSummary(template),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
                 items(filtered, key = { it.path }) { page ->
                     Row(
                         modifier = Modifier
@@ -857,18 +1451,27 @@ private fun PageViewerScreen(
     frontmatter: JsonObject?,
     pageTasks: List<ApiTaskItem>,
     derived: DerivedPageResponse?,
+    pageHistory: List<PageRevisionRecord>,
     settings: dev.carnager.noterious.data.AppSettings,
     error: String?,
     isLoading: Boolean,
     isSaving: Boolean,
+    isPageHistoryLoading: Boolean,
+    isPageHistoryBusy: Boolean,
     onBack: () -> Unit,
     onOpenPage: (String) -> Unit,
     onClearError: () -> Unit,
     onSavePage: (String, String, (Boolean) -> Unit) -> Unit,
+    onRenamePage: (String, (Boolean) -> Unit) -> Unit,
+    onDeletePage: ((Boolean) -> Unit) -> Unit,
+    onLoadPageHistory: () -> Unit,
+    onRestorePageHistory: (String, (Boolean) -> Unit) -> Unit,
+    onPurgePageHistory: ((Boolean) -> Unit) -> Unit,
     onShowGlobalMenu: () -> Unit,
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onPatchFrontmatter: (set: Map<String, kotlinx.serialization.json.JsonElement>, remove: List<String>, onResult: (Boolean) -> Unit) -> Unit,
     onUploadDocument: (Uri, (DocumentRecord?) -> Unit) -> Unit,
+    onGenerateQueryCopilot: (intent: String, onResult: (QueryCopilotResponse?) -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -911,6 +1514,13 @@ private fun PageViewerScreen(
     var isFrontmatterSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
     var frontmatterDraftState by remember(pagePath) { mutableStateOf<FrontmatterDraftState?>(null) }
     var isPatchingFrontmatter by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var isPageHistorySheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var isPageActionsSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var isRenamePageSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var isQueryInsertSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var queryInsertDraft by rememberSaveable(pagePath) { mutableStateOf("") }
+    var isGeneratingQuery by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var isPerformingPageAction by rememberSaveable(pagePath) { mutableStateOf(false) }
 
     LaunchedEffect(error) {
         error?.let { message ->
@@ -936,6 +1546,13 @@ private fun PageViewerScreen(
         pendingBlockInsertAnchor = null
         imageActionTarget = null
         pendingImageSaveTarget = null
+        isPageHistorySheetVisible = false
+        isPageActionsSheetVisible = false
+        isRenamePageSheetVisible = false
+        isQueryInsertSheetVisible = false
+        queryInsertDraft = ""
+        isGeneratingQuery = false
+        isPerformingPageAction = false
     }
 
     LaunchedEffect(editorMode) {
@@ -1027,6 +1644,9 @@ private fun PageViewerScreen(
         rawEditorValue = TextFieldValue(baseMarkdown)
         syncGuiBlocksFromMarkdown(baseMarkdown)
         blockActionMenuState = null
+        isQueryInsertSheetVisible = false
+        queryInsertDraft = ""
+        isGeneratingQuery = false
         pendingBlockInsertAnchor = null
         tableEditorState = null
         textBlockEditorState = null
@@ -1087,9 +1707,9 @@ private fun PageViewerScreen(
             }
             return
         }
-        if (isTemplateMetadataKey(key)) {
+        if (isInternalFrontmatterMetadataKey(key)) {
             coroutineScope.launch {
-                snackbarHostState.showSnackbar("Template metadata keys are reserved.")
+                snackbarHostState.showSnackbar("Internal metadata keys are reserved.")
             }
             return
         }
@@ -1232,11 +1852,80 @@ private fun PageViewerScreen(
         selectedBlockIndex = blockIndex
         tableEditorState = null
         textBlockEditorState = null
+        isQueryInsertSheetVisible = false
+        isGeneratingQuery = false
         pendingBlockInsertAnchor = null
         blockActionMenuState = BlockActionMenuState(
             blockIndex = blockIndex,
             lineNumber = lineNumber,
         )
+    }
+
+    fun dismissQueryInsertSheet() {
+        if (isGeneratingQuery) {
+            return
+        }
+        isQueryInsertSheetVisible = false
+        queryInsertDraft = ""
+        pendingBlockInsertAnchor = null
+    }
+
+    fun openQueryInsertSheet() {
+        val target = blockActionMenuState ?: return
+        pendingBlockInsertAnchor = PendingBlockInsertAnchor(
+            blockIndex = target.blockIndex,
+            placement = target.placement,
+        )
+        blockActionMenuState = null
+        queryInsertDraft = ""
+        isGeneratingQuery = false
+        isQueryInsertSheetVisible = true
+    }
+
+    fun generateAndInsertQueryBlock(intent: String) {
+        val normalizedIntent = intent.trim()
+        if (normalizedIntent.isBlank()) {
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar("Describe what the query should do.")
+            }
+            return
+        }
+        isGeneratingQuery = true
+        onGenerateQueryCopilot(normalizedIntent) { response ->
+            isGeneratingQuery = false
+            if (response == null) {
+                return@onGenerateQueryCopilot
+            }
+            val generatedQuery = response.formattedQuery.trim().ifBlank {
+                response.query.trim()
+            }
+            if (generatedQuery.isBlank()) {
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(
+                        response.error.ifBlank { "AI returned no query." },
+                    )
+                }
+                return@onGenerateQueryCopilot
+            }
+            insertBlockAtAnchor(
+                block = NoteEditorBlock.CodeFence(
+                    text = generatedQuery,
+                    language = "query",
+                ),
+                anchor = pendingBlockInsertAnchor,
+            )
+            isQueryInsertSheetVisible = false
+            queryInsertDraft = ""
+            coroutineScope.launch {
+                snackbarHostState.showSnackbar(
+                    if (response.valid) {
+                        "Inserted AI-generated query block."
+                    } else {
+                        "Inserted AI query draft with validation warnings."
+                    },
+                )
+            }
+        }
     }
 
     fun applyBlockInsertCommand(command: NoteSlashCommand) {
@@ -1460,6 +2149,10 @@ private fun PageViewerScreen(
         when {
             frontmatterDraftState != null -> frontmatterDraftState = null
             isFrontmatterSheetVisible -> dismissFrontmatterSheet()
+            isPageHistorySheetVisible -> isPageHistorySheetVisible = false
+            isRenamePageSheetVisible -> isRenamePageSheetVisible = false
+            isPageActionsSheetVisible -> isPageActionsSheetVisible = false
+            isQueryInsertSheetVisible && !isGeneratingQuery -> dismissQueryInsertSheet()
             blockActionMenuState != null -> blockActionMenuState = null
             imageActionTarget != null -> imageActionTarget = null
             textBlockEditorState != null -> textBlockEditorState = null
@@ -1479,6 +2172,7 @@ private fun PageViewerScreen(
     val renderedMarkdown = currentMarkdownDraft()
     val isDirty = renderedMarkdown != baseMarkdown
     val isEditMode = editorMode == NoteEditorMode.Edit
+    val backlinks = if (isDirty || editorMode != NoteEditorMode.Preview) emptyList() else derived?.backlinks.orEmpty()
     val queryBlocks = if (isDirty || isEditMode) emptyList() else derived?.queryBlocks.orEmpty()
     val previewItems = remember(renderedMarkdown, queryBlocks) {
         buildNotePreviewItems(renderedMarkdown, queryBlocks)
@@ -1625,6 +2319,21 @@ private fun PageViewerScreen(
                                 enabled = !isSaving && content != null,
                             ) {
                                 Icon(Icons.Default.Tune, contentDescription = "Frontmatter")
+                            }
+                            IconButton(
+                                onClick = {
+                                    isPageHistorySheetVisible = true
+                                    onLoadPageHistory()
+                                },
+                                enabled = !isSaving && content != null && !isPageHistoryBusy,
+                            ) {
+                                Icon(Icons.Default.History, contentDescription = "History")
+                            }
+                            TextButton(
+                                onClick = { isPageActionsSheetVisible = true },
+                                enabled = !isSaving && content != null,
+                            ) {
+                                Text("Note")
                             }
                             TextButton(
                                 onClick = { enterEditMode() },
@@ -1782,6 +2491,15 @@ private fun PageViewerScreen(
                             text = "Query results update after save.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+
+                    if (backlinks.isNotEmpty()) {
+                        Spacer(Modifier.height(20.dp))
+                        BacklinksSection(
+                            backlinks = backlinks,
+                            scopePrefix = settings.scopePrefix,
+                            onOpenPage = onOpenPage,
                         )
                     }
                 }
@@ -1959,6 +2677,17 @@ private fun PageViewerScreen(
         )
     }
 
+    if (isQueryInsertSheetVisible) {
+        QueryInsertSheet(
+            intentText = queryInsertDraft,
+            isGenerating = isGeneratingQuery,
+            onDismiss = ::dismissQueryInsertSheet,
+            onIntentTextChange = { queryInsertDraft = it },
+            onUseExample = { queryInsertDraft = it },
+            onGenerate = { generateAndInsertQueryBlock(queryInsertDraft) },
+        )
+    }
+
     blockActionMenuState?.let { target ->
         BlockActionMenuSheet(
             lineNumber = target.lineNumber,
@@ -1969,6 +2698,7 @@ private fun PageViewerScreen(
             onPlacementChange = { placement ->
                 blockActionMenuState = target.copy(placement = placement)
             },
+            onInsertQuery = { openQueryInsertSheet() },
             onUploadFile = {
                 pendingBlockInsertAnchor = PendingBlockInsertAnchor(
                     blockIndex = target.blockIndex,
@@ -1986,6 +2716,620 @@ private fun PageViewerScreen(
                 applyBlockInsertCommand(command)
             },
         )
+    }
+
+    if (isPageActionsSheetVisible) {
+        NoteActionsSheet(
+            pagePath = displayPath,
+            isBusy = isPerformingPageAction || isPageHistoryBusy,
+            onDismiss = {
+                if (!isPerformingPageAction && !isPageHistoryBusy) {
+                    isPageActionsSheetVisible = false
+                }
+            },
+            onHistory = {
+                isPageActionsSheetVisible = false
+                isPageHistorySheetVisible = true
+                onLoadPageHistory()
+            },
+            onRename = {
+                isPageActionsSheetVisible = false
+                isRenamePageSheetVisible = true
+            },
+            onDelete = {
+                isPerformingPageAction = true
+                onDeletePage { success ->
+                    isPerformingPageAction = false
+                    if (success) {
+                        isPageActionsSheetVisible = false
+                    }
+                }
+            },
+        )
+    }
+
+    if (isPageHistorySheetVisible) {
+        PageHistorySheet(
+            pagePath = displayPath,
+            revisions = pageHistory,
+            isLoading = isPageHistoryLoading,
+            isBusy = isPageHistoryBusy,
+            onDismiss = {
+                if (!isPageHistoryBusy) {
+                    isPageHistorySheetVisible = false
+                }
+            },
+            onRefresh = onLoadPageHistory,
+            onRestore = { revisionId ->
+                onRestorePageHistory(revisionId) { success ->
+                    if (success) {
+                        isPageHistorySheetVisible = false
+                    }
+                }
+            },
+            onPurge = {
+                onPurgePageHistory { }
+            },
+        )
+    }
+
+    if (isRenamePageSheetVisible) {
+        RenameNoteSheet(
+            pagePath = displayPath,
+            isSaving = isPerformingPageAction,
+            onDismiss = {
+                if (!isPerformingPageAction) {
+                    isRenamePageSheetVisible = false
+                }
+            },
+            onSave = { nextPagePath ->
+                isPerformingPageAction = true
+                onRenamePage(nextPagePath) { success ->
+                    isPerformingPageAction = false
+                    if (success) {
+                        isRenamePageSheetVisible = false
+                    }
+                }
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NoteActionsSheet(
+    pagePath: String,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onHistory: (() -> Unit)? = null,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Note actions",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = pagePath,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (onHistory != null) {
+                Button(
+                    onClick = onHistory,
+                    enabled = !isBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Revision history")
+                }
+            }
+            Button(
+                onClick = onRename,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Rename or move note")
+            }
+            TextButton(
+                onClick = onDelete,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (isBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Text(
+                        text = "Move note to trash",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RenameNoteSheet(
+    pagePath: String,
+    isSaving: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var pagePathValue by remember(pagePath) {
+        mutableStateOf(
+            TextFieldValue(
+                text = pagePath,
+                selection = androidx.compose.ui.text.TextRange(pagePath.length),
+            ),
+        )
+    }
+
+    LaunchedEffect(pagePath) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .imePadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Rename or move note",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "Enter a nested path to move this note within the current scope.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = pagePathValue,
+                onValueChange = { pagePathValue = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                enabled = !isSaving,
+                label = { Text("Note path") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = {
+                    if (!isSaving) {
+                        onSave(pagePathValue.text.trim())
+                    }
+                }),
+                singleLine = true,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isSaving) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = { onSave(pagePathValue.text.trim()) },
+                    enabled = !isSaving,
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Done")
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreateNoteSheet(
+    pagePath: String,
+    isSaving: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var pagePathValue by remember(pagePath) {
+        mutableStateOf(
+            TextFieldValue(
+                text = pagePath,
+                selection = androidx.compose.ui.text.TextRange(pagePath.length),
+            ),
+        )
+    }
+
+    LaunchedEffect(pagePath) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .imePadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "New note",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "Enter a name or nested path to create a note within the current scope.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = pagePathValue,
+                onValueChange = { pagePathValue = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                enabled = !isSaving,
+                label = { Text("Note path") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = {
+                    if (!isSaving) {
+                        onSave(pagePathValue.text.trim())
+                    }
+                }),
+                singleLine = true,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isSaving) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = { onSave(pagePathValue.text.trim()) },
+                    enabled = !isSaving,
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Create")
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QueryInsertSheet(
+    intentText: String,
+    isGenerating: Boolean,
+    onDismiss: () -> Unit,
+    onIntentTextChange: (String) -> Unit,
+    onUseExample: (String) -> Unit,
+    onGenerate: () -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var intentValue by remember {
+        mutableStateOf(
+            TextFieldValue(
+                text = intentText,
+                selection = androidx.compose.ui.text.TextRange(intentText.length),
+            ),
+        )
+    }
+
+    LaunchedEffect(intentText) {
+        if (intentValue.text != intentText) {
+            intentValue = TextFieldValue(
+                text = intentText,
+                selection = androidx.compose.ui.text.TextRange(intentText.length),
+            )
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .imePadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Generate query",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "Describe what the query should do. The server AI drafts a fenced query block and inserts it into the note.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AssistChip(
+                    onClick = { onUseExample("show open tasks due this week") },
+                    enabled = !isGenerating,
+                    label = { Text("Open tasks") },
+                )
+                AssistChip(
+                    onClick = { onUseExample("show recently updated project pages") },
+                    enabled = !isGenerating,
+                    label = { Text("Recent pages") },
+                )
+            }
+            OutlinedTextField(
+                value = intentValue,
+                onValueChange = {
+                    intentValue = it
+                    onIntentTextChange(it.text)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                enabled = !isGenerating,
+                label = { Text("Intent") },
+                placeholder = {
+                    Text(
+                        text = "show all contacts with birthday reminders",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                },
+                minLines = 3,
+                maxLines = 6,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        if (!isGenerating && intentValue.text.isNotBlank()) {
+                            keyboardController?.hide()
+                            onGenerate()
+                        }
+                    },
+                ),
+            )
+            if (isGenerating) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isGenerating) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = {
+                        keyboardController?.hide()
+                        onGenerate()
+                    },
+                    enabled = !isGenerating && intentText.isNotBlank(),
+                ) {
+                    if (isGenerating) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Generate")
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FolderActionsSheet(
+    folderPath: String,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onCreateSubfolder: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Folder actions",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = folderPath,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onCreateSubfolder,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Create subfolder")
+            }
+            Button(
+                onClick = onRename,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Rename or move folder")
+            }
+            Text(
+                text = "Deleting a folder moves markdown notes inside it to trash. Empty folders and non-note files are deleted immediately.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(
+                onClick = onDelete,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (isBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Text(
+                        text = "Delete folder",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FolderPathSheet(
+    title: String,
+    supportingText: String,
+    folderPath: String,
+    isSaving: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var folderPathValue by remember(folderPath) {
+        mutableStateOf(
+            TextFieldValue(
+                text = folderPath,
+                selection = androidx.compose.ui.text.TextRange(folderPath.length),
+            ),
+        )
+    }
+
+    LaunchedEffect(folderPath) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .imePadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = supportingText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = folderPathValue,
+                onValueChange = { folderPathValue = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                enabled = !isSaving,
+                label = { Text("Folder path") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = {
+                    if (!isSaving) {
+                        onSave(folderPathValue.text.trim())
+                    }
+                }),
+                singleLine = true,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isSaving) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = { onSave(folderPathValue.text.trim()) },
+                    enabled = !isSaving,
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Done")
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
     }
 }
 
@@ -3102,6 +4446,23 @@ private fun formatTaskReminderValue(raw: String): String {
     }.getOrDefault(value)
 }
 
+private fun firstContentLine(rawMarkdown: String): String {
+    return rawMarkdown
+        .lineSequence()
+        .map(String::trim)
+        .firstOrNull(String::isNotBlank)
+        ?: "Empty note"
+}
+
+private fun formatServerDateTimeValue(raw: String): String {
+    val instant = runCatching { Instant.parse(raw) }.getOrNull() ?: return raw
+    return runCatching {
+        instant
+            .atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT))
+    }.getOrDefault(raw)
+}
+
 @Composable
 private fun LineAnchor(
     lineNumber: Int,
@@ -3492,6 +4853,7 @@ private fun BlockActionMenuSheet(
     isUploadingDocument: Boolean,
     onDismiss: () -> Unit,
     onPlacementChange: (BlockInsertPlacement) -> Unit,
+    onInsertQuery: () -> Unit,
     onUploadFile: () -> Unit,
     onDelete: (() -> Unit)?,
     onApplyCommand: (NoteSlashCommand) -> Unit,
@@ -3552,6 +4914,7 @@ private fun BlockActionMenuSheet(
             SlashMenuItem(icon = Icons.Default.Menu, label = "Bullet List", onClick = { onApplyCommand(NoteSlashCommand.Bullet) })
             SlashMenuItem(icon = Icons.Default.Menu, label = "Numbered List", onClick = { onApplyCommand(NoteSlashCommand.Numbered) })
             SlashMenuItem(icon = Icons.Default.Description, label = "Quote", onClick = { onApplyCommand(NoteSlashCommand.Quote) })
+            SlashMenuItem(icon = Icons.Default.Tune, label = "Query", onClick = onInsertQuery)
             SlashMenuItem(icon = Icons.Default.Description, label = "Code Block", onClick = { onApplyCommand(NoteSlashCommand.Code) })
             SlashMenuItem(icon = Icons.Default.Description, label = "Table", onClick = { onApplyCommand(NoteSlashCommand.Table) })
             SlashMenuItem(icon = Icons.Default.Description, label = "Image", onClick = { onApplyCommand(NoteSlashCommand.Image) })
@@ -3589,22 +4952,10 @@ private fun replaceSelectionWithSnippet(
 
 // ─── Frontmatter Panel ──────────────────────────────────────────────────
 
-private val templateMetadataKeys = setOf(
-    "_template",
-    "_template_label",
-    "_template_folder",
-    "_template_list",
-    "_template_tags",
-    "_template_bool",
-    "_template_date",
-    "_template_datetime",
-    "_template_notification",
-)
-
 private val frontmatterDateTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
-private fun isTemplateMetadataKey(key: String): Boolean {
-    return templateMetadataKeys.contains(key.trim())
+private fun isInternalFrontmatterMetadataKey(key: String): Boolean {
+    return isInternalTemplateMetadataKey(key)
 }
 
 private fun isTagPropertyKey(key: String?): Boolean {
@@ -3632,21 +4983,23 @@ private fun frontmatterKindHints(frontmatter: JsonObject?): Map<String, Frontmat
     val source = frontmatter ?: return emptyMap()
     val hints = mutableMapOf<String, FrontmatterKind>()
 
-    fun register(metadataKey: String, kind: FrontmatterKind) {
-        jsonElementStringValues(source[metadataKey]).forEach { key ->
-            val normalizedKey = key.trim()
-            if (normalizedKey.isNotBlank()) {
-                hints.putIfAbsent(normalizedKey, kind)
+    fun register(metadataKeys: List<String>, kind: FrontmatterKind) {
+        metadataKeys.forEach { metadataKey ->
+            jsonElementStringValues(source[metadataKey]).forEach { key ->
+                val normalizedKey = key.trim()
+                if (normalizedKey.isNotBlank()) {
+                    hints[normalizedKey] = kind
+                }
             }
         }
     }
 
-    register("_template_list", FrontmatterKind.List)
-    register("_template_tags", FrontmatterKind.Tags)
-    register("_template_bool", FrontmatterKind.Bool)
-    register("_template_date", FrontmatterKind.Date)
-    register("_template_datetime", FrontmatterKind.DateTime)
-    register("_template_notification", FrontmatterKind.Notification)
+    register(listOf(propertyListKey, templateListKey), FrontmatterKind.List)
+    register(listOf(propertyTagsKey, templateTagsKey), FrontmatterKind.Tags)
+    register(listOf(propertyBoolKey, templateBoolKey), FrontmatterKind.Bool)
+    register(listOf(propertyDateKey, templateDateKey), FrontmatterKind.Date)
+    register(listOf(propertyDateTimeKey, templateDateTimeKey), FrontmatterKind.DateTime)
+    register(listOf(propertyNotificationKey, templateNotificationKey), FrontmatterKind.Notification)
     return hints
 }
 
@@ -3699,7 +5052,7 @@ private fun frontmatterVisibleEntries(frontmatter: JsonObject?): List<Frontmatte
     val source = frontmatter ?: return emptyList()
     val kindHints = frontmatterKindHints(source)
     return source.entries
-        .filterNot { (key, value) -> isTemplateMetadataKey(key) || value is JsonNull }
+        .filterNot { (key, value) -> isInternalFrontmatterMetadataKey(key) || value is JsonNull }
         .sortedBy { it.key.lowercase() }
         .map { (key, value) ->
             FrontmatterEntry(
@@ -4526,6 +5879,68 @@ private fun looksLikePageLink(value: String): Boolean {
     return value.contains('/') && !value.startsWith("http") && !value.contains(' ')
 }
 
+private fun queryWorkbenchPreviewBlock(workbench: QueryWorkbenchResult): QueryBlock? {
+    val preview = workbench.preview
+    val count = workbench.count
+    if (preview == null) {
+        val fallbackError = count?.error.orEmpty().trim()
+        return fallbackError.takeIf(String::isNotBlank)?.let { error ->
+            QueryBlock(
+                source = "workbench",
+                line = 0,
+                key = "workbench-preview",
+                error = error,
+                rowCount = 0,
+                stale = false,
+            )
+        }
+    }
+
+    val columns = preview.columns
+    val rows = preview.rows
+    val error = preview.error.orEmpty().ifBlank {
+        count?.error.orEmpty()
+    }
+    return QueryBlock(
+        source = "workbench",
+        line = 0,
+        key = "workbench-preview",
+        result = if (preview.valid) {
+            QueryResult(
+                columns = columns,
+                rows = rows,
+            )
+        } else {
+            null
+        },
+        error = if (preview.valid) "" else error,
+        rowCount = if (count?.valid == true) count.count else preview.count,
+        renderHint = queryWorkbenchRenderHint(columns, rows),
+        stale = false,
+    )
+}
+
+private fun queryWorkbenchRenderHint(
+    columns: List<String>,
+    rows: List<Map<String, kotlinx.serialization.json.JsonElement>>,
+): String {
+    return if (queryResultDisplayColumns(columns, rows).size <= 1) {
+        "list"
+    } else {
+        "table"
+    }
+}
+
+private fun queryWorkbenchFallbackMessage(workbench: QueryWorkbenchResult): String {
+    return workbench.preview?.error
+        ?.trim()
+        ?.takeIf(String::isNotBlank)
+        ?: workbench.count?.error
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+        ?: "No preview available for this query."
+}
+
 // ─── Query Block Rendering ──────────────────────────────────────────────
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -4749,94 +6164,767 @@ private fun queryCellAnnotatedText(
     return parseInlineMarkdown(rawValue, linkColor)
 }
 
-// ─── Home Screen ────────────────────────────────────────────────────────
-
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(
-    uiState: MainUiState,
-    onOpenPage: (String) -> Unit,
-    onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
-    onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
+private fun PageHistorySheet(
+    pagePath: String,
+    revisions: List<PageRevisionRecord>,
+    isLoading: Boolean,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onRestore: (String) -> Unit,
+    onPurge: () -> Unit,
 ) {
-    val today = uiState.today
-
-    if (uiState.settings.serverUrl.isBlank()) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(
-                "Configure the server URL in Settings.",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        return
+    var selectedRevisionId by rememberSaveable(pagePath) { mutableStateOf<String?>(null) }
+    val selectedRevision = remember(revisions, selectedRevisionId) {
+        revisions.firstOrNull { revision -> revision.id == selectedRevisionId } ?: revisions.firstOrNull()
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            top = 16.dp,
-            end = 16.dp,
-            bottom = rootFabContentBottomPadding,
-        ),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    LaunchedEffect(pagePath, revisions) {
+        if (selectedRevisionId == null || revisions.none { it.id == selectedRevisionId }) {
+            selectedRevisionId = revisions.firstOrNull()?.id
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
-        if (today.overdue.isNotEmpty()) {
-            item { SectionHeader("Overdue (${today.overdue.size})") }
-            items(today.overdue, key = { it.ref }) { task ->
-                TaskResultCard(
-                    task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
-                    scopePrefix = uiState.settings.scopePrefix,
-                    onOpenPage = onOpenPage,
-                    onPatchTask = onPatchTask,
-                    onDeleteTask = onDeleteTask,
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Revision history",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = pagePath,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (isLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AssistChip(
+                    onClick = onRefresh,
+                    enabled = !isBusy,
+                    label = { Text("Refresh") },
+                )
+                AssistChip(
+                    onClick = onPurge,
+                    enabled = !isBusy && revisions.isNotEmpty(),
+                    label = { Text("Purge history") },
                 )
             }
-        }
-
-        if (today.dueToday.isNotEmpty()) {
-            item { SectionHeader("Due today (${today.dueToday.size})") }
-            items(today.dueToday, key = { it.ref }) { task ->
-                TaskResultCard(
-                    task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
-                    scopePrefix = uiState.settings.scopePrefix,
-                    onOpenPage = onOpenPage,
-                    onPatchTask = onPatchTask,
-                    onDeleteTask = onDeleteTask,
+            if (revisions.isEmpty() && !isLoading) {
+                Text(
+                    text = "No saved revisions for this note yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-        }
-
-        if (today.remindersToday.isNotEmpty()) {
-            item { SectionHeader("Reminders") }
-            items(today.remindersToday, key = { it.ref }) { task ->
-                TaskResultCard(
-                    task = task.toTaskResultCardModel(uiState.settings.scopePrefix),
-                    scopePrefix = uiState.settings.scopePrefix,
-                    onOpenPage = onOpenPage,
-                    onPatchTask = onPatchTask,
-                    onDeleteTask = onDeleteTask,
-                )
-            }
-        }
-
-        if (today.overdue.isEmpty() && today.dueToday.isEmpty() && today.remindersToday.isEmpty()) {
-            item {
-                Box(
-                    Modifier
+            } else if (revisions.isNotEmpty()) {
+                LazyColumn(
+                    modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 32.dp),
-                    contentAlignment = Alignment.Center,
+                        .height(220.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    items(revisions, key = { it.id }) { revision ->
+                        val selected = selectedRevision?.id == revision.id
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !isBusy) {
+                                    selectedRevisionId = revision.id
+                                },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (selected) {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                },
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    text = formatServerDateTimeValue(revision.savedAt),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.onSecondaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                                Text(
+                                    text = firstContentLine(revision.rawMarkdown),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.onSecondaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+                selectedRevision?.let { revision ->
                     Text(
-                        "No tasks for today.",
-                        style = MaterialTheme.typography.bodyLarge,
+                        text = "Preview",
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(12.dp),
+                        ) {
+                            Text(
+                                text = revision.rawMarkdown.ifBlank { "Empty note" },
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isBusy) {
+                    Text("Close")
+                }
+                Button(
+                    onClick = { selectedRevision?.id?.let(onRestore) },
+                    enabled = !isBusy && selectedRevision != null,
+                ) {
+                    if (isBusy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Restore")
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TrashSheet(
+    pages: List<TrashPageRecord>,
+    scopePrefix: String,
+    isLoading: Boolean,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onRestore: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onEmptyTrash: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Trash",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = if (pages.isEmpty()) "Deleted notes stay here until restored or removed permanently." else "${pages.size} deleted notes",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (isLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AssistChip(
+                    onClick = onRefresh,
+                    enabled = !isBusy,
+                    label = { Text("Refresh") },
+                )
+                AssistChip(
+                    onClick = onEmptyTrash,
+                    enabled = !isBusy && pages.isNotEmpty(),
+                    label = { Text("Empty trash") },
+                )
+            }
+            if (pages.isEmpty() && !isLoading) {
+                Text(
+                    text = "Trash is empty.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (pages.isNotEmpty()) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(pages, key = { it.page }) { entry ->
+                        val displayPath = displayPagePath(entry.page, scopePrefix).ifBlank { entry.page }
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(
+                                    text = pageTitleFromPath(displayPath),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "$displayPath · deleted ${formatServerDateTimeValue(entry.deletedAt)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    text = firstContentLine(entry.rawMarkdown),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                                ) {
+                                    TextButton(
+                                        onClick = { onDelete(entry.page) },
+                                        enabled = !isBusy,
+                                    ) {
+                                        Text(
+                                            text = "Delete permanently",
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                    Button(
+                                        onClick = { onRestore(entry.page) },
+                                        enabled = !isBusy,
+                                    ) {
+                                        Text("Restore")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isBusy) {
+                    Text("Close")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DocumentLibrarySheet(
+    documents: List<DocumentRecord>,
+    scopePrefix: String,
+    isLoading: Boolean,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenDocument: (String) -> Unit,
+    onRenameDocument: (String, String, (Boolean) -> Unit) -> Unit,
+    onDeleteDocument: (String, (Boolean) -> Unit) -> Unit,
+) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var actionDocumentPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var renameDocumentPath by rememberSaveable { mutableStateOf<String?>(null) }
+    val scopedDocuments = remember(documents, scopePrefix) {
+        documents.filter { document -> pathWithinScope(document.path, scopePrefix) }
+    }
+    val filteredDocuments = remember(scopedDocuments, query) {
+        val normalizedQuery = query.trim().lowercase()
+        val visibleDocuments = if (normalizedQuery.isBlank()) {
+            scopedDocuments
+        } else {
+            scopedDocuments.filter { document ->
+                document.name.lowercase().contains(normalizedQuery) ||
+                    document.path.lowercase().contains(normalizedQuery) ||
+                    document.contentType.lowercase().contains(normalizedQuery)
+            }
+        }
+        if (normalizedQuery.isBlank()) {
+            visibleDocuments.sortedWith(
+                compareBy<DocumentRecord>(
+                    { !(it.usageKnown && it.referenceCount == 0) },
+                    { -documentTimestampSortValue(it) },
+                    { it.path.lowercase() },
+                ),
+            )
+        } else {
+            visibleDocuments.sortedWith(
+                compareByDescending<DocumentRecord> { documentSearchScore(it, normalizedQuery) }
+                    .thenByDescending { documentTimestampSortValue(it) }
+                    .thenBy { it.path.lowercase() },
+            )
+        }
+    }
+    val selectedDocument = remember(documents, actionDocumentPath) {
+        val normalizedTargetPath = normalizePagePath(actionDocumentPath.orEmpty())
+        documents.firstOrNull { document ->
+            normalizePagePath(document.path).equals(normalizedTargetPath, ignoreCase = true)
+        }
+    }
+    val renameTargetDocument = remember(documents, renameDocumentPath) {
+        val normalizedTargetPath = normalizePagePath(renameDocumentPath.orEmpty())
+        documents.firstOrNull { document ->
+            normalizePagePath(document.path).equals(normalizedTargetPath, ignoreCase = true)
+        }
+    }
+
+    selectedDocument?.let { document ->
+        DocumentActionsSheet(
+            document = document,
+            scopePrefix = scopePrefix,
+            isBusy = isBusy,
+            onDismiss = {
+                if (!isBusy) {
+                    actionDocumentPath = null
+                }
+            },
+            onRename = {
+                renameDocumentPath = document.path
+                actionDocumentPath = null
+            },
+            onDelete = {
+                onDeleteDocument(document.path) { success ->
+                    if (success) {
+                        actionDocumentPath = null
+                    }
+                }
+            },
+        )
+    }
+
+    renameTargetDocument?.let { document ->
+        DocumentPathSheet(
+            documentPath = displayPagePath(document.path, scopePrefix).ifBlank { document.path },
+            isSaving = isBusy,
+            onDismiss = {
+                if (!isBusy) {
+                    renameDocumentPath = null
+                }
+            },
+            onSave = { nextDocumentPath ->
+                onRenameDocument(document.path, nextDocumentPath) { success ->
+                    if (success) {
+                        renameDocumentPath = null
+                        actionDocumentPath = null
+                    }
+                }
+            },
+        )
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Documents",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = when {
+                    scopedDocuments.isEmpty() -> "No files in the current scope yet."
+                    scopePrefix.isBlank() -> "${scopedDocuments.size} files in the vault"
+                    else -> "${scopedDocuments.size} files in this scope"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (isLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AssistChip(
+                    onClick = onRefresh,
+                    enabled = !isBusy,
+                    label = { Text("Refresh") },
+                )
+            }
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isBusy,
+                label = { Text("Filter files") },
+                singleLine = true,
+            )
+            if (filteredDocuments.isEmpty() && !isLoading) {
+                Text(
+                    text = if (query.isBlank()) {
+                        "No files found in this scope."
+                    } else {
+                        "No matching files."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (filteredDocuments.isNotEmpty()) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(filteredDocuments, key = { it.path }) { document ->
+                        val displayPath = displayPagePath(document.path, scopePrefix).ifBlank { document.path }
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !isBusy) {
+                                    onOpenDocument(document.path)
+                                },
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Icon(
+                                    Icons.Default.Description,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Text(
+                                        text = document.name.ifBlank { pageTitleFromPath(document.path) },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = displayPath,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        text = documentMetaSummary(document),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { actionDocumentPath = document.path },
+                                    enabled = !isBusy,
+                                ) {
+                                    Icon(
+                                        Icons.Default.MoreVert,
+                                        contentDescription = "File actions",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isBusy) {
+                    Text("Close")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DocumentActionsSheet(
+    document: DocumentRecord,
+    scopePrefix: String,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "File actions",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = displayPagePath(document.path, scopePrefix).ifBlank { document.path },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            documentUsageSummary(document).takeIf(String::isNotBlank)?.let { usage ->
+                Text(
+                    text = usage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Button(
+                onClick = onRename,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Rename or move file")
+            }
+            TextButton(
+                onClick = onDelete,
+                enabled = !isBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (isBusy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Text(
+                        text = "Delete file",
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             }
+            Spacer(Modifier.height(8.dp))
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DocumentPathSheet(
+    documentPath: String,
+    isSaving: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var documentPathValue by remember(documentPath) {
+        mutableStateOf(
+            TextFieldValue(
+                text = documentPath,
+                selection = androidx.compose.ui.text.TextRange(documentPath.length),
+            ),
+        )
+    }
+
+    LaunchedEffect(documentPath) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .imePadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Rename or move file",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "Enter a nested path to move this file within the current scope.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = documentPathValue,
+                onValueChange = { documentPathValue = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+                enabled = !isSaving,
+                label = { Text("File path") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = {
+                    if (!isSaving) {
+                        onSave(documentPathValue.text.trim())
+                    }
+                }),
+                singleLine = true,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isSaving) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = { onSave(documentPathValue.text.trim()) },
+                    enabled = !isSaving,
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("Done")
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+private fun documentTimestampSortValue(document: DocumentRecord): Long {
+    return runCatching { java.time.Instant.parse(document.createdAt).toEpochMilli() }.getOrDefault(0L)
+}
+
+private fun documentSearchScore(document: DocumentRecord, normalizedQuery: String): Int {
+    val name = document.name.lowercase()
+    val path = document.path.lowercase()
+    return when {
+        name == normalizedQuery -> 4_000
+        name.startsWith(normalizedQuery) -> 2_800
+        name.contains(normalizedQuery) -> 1_600
+        path.startsWith(normalizedQuery) -> 1_200
+        path.contains(normalizedQuery) -> 800
+        document.contentType.lowercase().contains(normalizedQuery) -> 400
+        else -> 0
+    }
+}
+
+private fun documentUsageSummary(document: DocumentRecord): String {
+    if (!document.usageKnown) {
+        return ""
+    }
+    return if (document.referenceCount > 0) {
+        "Used in ${document.referenceCount} note" + if (document.referenceCount == 1) "" else "s"
+    } else {
+        "Unused upload"
+    }
+}
+
+private fun documentSizeLabel(size: Long): String {
+    if (size <= 0L) return ""
+    val kib = size / 1024.0
+    return if (kib >= 1024.0) {
+        "${(kib / 1024.0 * 10).toInt() / 10.0} MB"
+    } else {
+        "${(kib * 10).toInt() / 10.0} KB"
+    }
+}
+
+private fun documentMetaSummary(document: DocumentRecord): String {
+    return listOf(
+        document.contentType.takeIf(String::isNotBlank),
+        documentSizeLabel(document.size).takeIf(String::isNotBlank),
+        documentUsageSummary(document).takeIf(String::isNotBlank),
+        document.createdAt.takeIf(String::isNotBlank)?.let(::formatServerDateTimeValue),
+    ).filterNotNull().joinToString(" · ")
 }
 
 @Composable
@@ -4848,6 +6936,78 @@ private fun SectionHeader(title: String) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
     )
+}
+
+@Composable
+private fun BacklinksSection(
+    backlinks: List<BacklinkRecord>,
+    scopePrefix: String,
+    onOpenPage: (String) -> Unit,
+) {
+    SectionHeader("Backlinks (${backlinks.size})")
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            backlinks.forEachIndexed { index, backlink ->
+                val title = backlink.sourceTitle.trim().ifBlank {
+                    pageTitleFromPath(backlink.sourcePage)
+                }
+                val supportingText = buildString {
+                    val pathText = displayPagePath(backlink.sourcePage, scopePrefix).ifBlank { backlink.sourcePage }
+                    if (pathText.isNotBlank()) {
+                        append(pathText)
+                    }
+                    if (backlink.line > 0) {
+                        if (isNotBlank()) {
+                            append(" · ")
+                        }
+                        append("line ")
+                        append(backlink.line)
+                    }
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenPage(backlink.sourcePage) }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = title.ifBlank { backlink.sourcePage },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    if (supportingText.isNotBlank()) {
+                        Text(
+                            text = supportingText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    backlink.linkText.trim().takeIf(String::isNotBlank)?.let { linkText ->
+                        Text(
+                            text = linkText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                if (index < backlinks.lastIndex) {
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                    )
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -5109,13 +7269,29 @@ private fun TaskResultCardModel.toApiTaskItem(): ApiTaskItem {
 @Composable
 private fun BrowseScreen(
     pages: List<ApiPageSummary>,
+    folders: List<String>,
     scopePrefix: String,
     currentFolder: String,
     selectedTag: String,
     onCurrentFolderChange: (String) -> Unit,
     onSelectedTagChange: (String) -> Unit,
     onOpenPage: (String) -> Unit,
+    onCreatePage: (String, (Boolean) -> Unit) -> Unit,
+    onCreateFolder: (String, (Boolean) -> Unit) -> Unit,
+    onRenamePage: (String, String, (Boolean) -> Unit) -> Unit,
+    onDeletePage: (String, (Boolean) -> Unit) -> Unit,
+    onRenameFolder: (String, String, (Boolean) -> Unit) -> Unit,
+    onDeleteFolder: (String, (Boolean) -> Unit) -> Unit,
 ) {
+    var pageActionTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var renamePageTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var createPagePathDraft by rememberSaveable { mutableStateOf<String?>(null) }
+    var folderActionTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var createFolderPathDraft by rememberSaveable { mutableStateOf<String?>(null) }
+    var renameFolderTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    var isPerformingPageAction by rememberSaveable { mutableStateOf(false) }
+    var isPerformingFolderAction by rememberSaveable { mutableStateOf(false) }
+    val isAnyActionBusy = isPerformingPageAction || isPerformingFolderAction
     val availableTags = remember(pages) {
         pages
             .flatMap { it.tags.orEmpty() }
@@ -5134,8 +7310,33 @@ private fun BrowseScreen(
             }
         }
     }
-    val tree = remember(filteredPages, scopePrefix) { buildFileTree(filteredPages, scopePrefix) }
+    val visibleFolders = remember(folders, selectedTag, scopePrefix) {
+        if (selectedTag.isBlank()) {
+            folders.filter { folderPath -> pathWithinScope(folderPath, scopePrefix) }
+        } else {
+            emptyList()
+        }
+    }
+    val tree = remember(filteredPages, visibleFolders, scopePrefix) {
+        buildFileTree(filteredPages, visibleFolders, scopePrefix)
+    }
     val entries = remember(tree, currentFolder) { entriesForFolder(tree, currentFolder) }
+    val selectedActionDisplayPath = remember(pageActionTarget, scopePrefix) {
+        pageActionTarget?.let { pagePath ->
+            displayPagePath(pagePath, scopePrefix).ifBlank { normalizePagePath(pagePath) }
+        }.orEmpty()
+    }
+    val renameActionDisplayPath = remember(renamePageTarget, scopePrefix) {
+        renamePageTarget?.let { pagePath ->
+            displayPagePath(pagePath, scopePrefix).ifBlank { normalizePagePath(pagePath) }
+        }.orEmpty()
+    }
+    val folderActionDisplayPath = remember(folderActionTarget) {
+        normalizePagePath(folderActionTarget.orEmpty())
+    }
+    val renameFolderDisplayPath = remember(renameFolderTarget) {
+        normalizePagePath(renameFolderTarget.orEmpty())
+    }
 
     LaunchedEffect(availableTags, selectedTag) {
         if (selectedTag.isNotBlank() && availableTags.none { it.equals(selectedTag, ignoreCase = true) }) {
@@ -5151,6 +7352,156 @@ private fun BrowseScreen(
 
     BackHandler(enabled = currentFolder.isNotEmpty()) {
         onCurrentFolderChange(currentFolder.substringBeforeLast('/', ""))
+    }
+
+    if (pageActionTarget != null) {
+        NoteActionsSheet(
+            pagePath = selectedActionDisplayPath,
+            isBusy = isPerformingPageAction,
+            onDismiss = {
+                if (!isPerformingPageAction) {
+                    pageActionTarget = null
+                }
+            },
+            onRename = {
+                renamePageTarget = pageActionTarget
+                pageActionTarget = null
+            },
+            onDelete = {
+                val targetPagePath = pageActionTarget ?: return@NoteActionsSheet
+                isPerformingPageAction = true
+                onDeletePage(targetPagePath) { success ->
+                    isPerformingPageAction = false
+                    if (success) {
+                        pageActionTarget = null
+                    }
+                }
+            },
+        )
+    }
+
+    if (renamePageTarget != null) {
+        RenameNoteSheet(
+            pagePath = renameActionDisplayPath,
+            isSaving = isPerformingPageAction,
+            onDismiss = {
+                if (!isPerformingPageAction) {
+                    renamePageTarget = null
+                }
+            },
+            onSave = { nextPagePath ->
+                val targetPagePath = renamePageTarget ?: return@RenameNoteSheet
+                isPerformingPageAction = true
+                onRenamePage(targetPagePath, nextPagePath) { success ->
+                    isPerformingPageAction = false
+                    if (success) {
+                        renamePageTarget = null
+                        pageActionTarget = null
+                    }
+                }
+            },
+        )
+    }
+
+    if (createPagePathDraft != null) {
+        CreateNoteSheet(
+            pagePath = createPagePathDraft.orEmpty(),
+            isSaving = isPerformingPageAction,
+            onDismiss = {
+                if (!isPerformingPageAction) {
+                    createPagePathDraft = null
+                }
+            },
+            onSave = { nextPagePath ->
+                isPerformingPageAction = true
+                onCreatePage(nextPagePath) { success ->
+                    isPerformingPageAction = false
+                    if (success) {
+                        createPagePathDraft = null
+                    }
+                }
+            },
+        )
+    }
+
+    if (folderActionTarget != null) {
+        FolderActionsSheet(
+            folderPath = folderActionDisplayPath,
+            isBusy = isPerformingFolderAction,
+            onDismiss = {
+                if (!isPerformingFolderAction) {
+                    folderActionTarget = null
+                }
+            },
+            onCreateSubfolder = {
+                val parentFolderPath = folderActionTarget ?: return@FolderActionsSheet
+                createFolderPathDraft = "$parentFolderPath/"
+                folderActionTarget = null
+            },
+            onRename = {
+                renameFolderTarget = folderActionTarget
+                folderActionTarget = null
+            },
+            onDelete = {
+                val targetFolderPath = folderActionTarget ?: return@FolderActionsSheet
+                isPerformingFolderAction = true
+                onDeleteFolder(targetFolderPath) { success ->
+                    isPerformingFolderAction = false
+                    if (success) {
+                        folderActionTarget = null
+                    }
+                }
+            },
+        )
+    }
+
+    if (createFolderPathDraft != null) {
+        FolderPathSheet(
+            title = "New folder",
+            supportingText = "Enter a nested path to create a folder within the current scope.",
+            folderPath = createFolderPathDraft.orEmpty(),
+            isSaving = isPerformingFolderAction,
+            onDismiss = {
+                if (!isPerformingFolderAction) {
+                    createFolderPathDraft = null
+                }
+            },
+            onSave = { nextFolderPath ->
+                isPerformingFolderAction = true
+                onCreateFolder(nextFolderPath) { success ->
+                    isPerformingFolderAction = false
+                    if (success) {
+                        createFolderPathDraft = null
+                        folderActionTarget = null
+                    }
+                }
+            },
+        )
+    }
+
+    if (renameFolderTarget != null) {
+        FolderPathSheet(
+            title = "Rename or move folder",
+            supportingText = "Enter a nested path to move this folder within the current scope.",
+            folderPath = renameFolderDisplayPath,
+            isSaving = isPerformingFolderAction,
+            onDismiss = {
+                if (!isPerformingFolderAction) {
+                    renameFolderTarget = null
+                }
+            },
+            onSave = { nextFolderPath ->
+                val targetFolderPath = renameFolderTarget ?: return@FolderPathSheet
+                isPerformingFolderAction = true
+                onRenameFolder(targetFolderPath, nextFolderPath) { success ->
+                    isPerformingFolderAction = false
+                    if (success) {
+                        renameFolderTarget = null
+                        folderActionTarget = null
+                    }
+                }
+            },
+        )
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -5185,98 +7536,170 @@ private fun BrowseScreen(
             }
         }
 
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = if (availableTags.isEmpty()) 8.dp else 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AssistChip(
+                onClick = {
+                    createPagePathDraft = if (currentFolder.isBlank()) "" else "$currentFolder/"
+                },
+                enabled = !isAnyActionBusy,
+                label = {
+                    Text(if (currentFolder.isBlank()) "New note" else "New note here")
+                },
+                leadingIcon = {
+                    Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp))
+                },
+            )
+            AssistChip(
+                onClick = {
+                    createFolderPathDraft = if (currentFolder.isBlank()) "" else "$currentFolder/"
+                },
+                enabled = !isAnyActionBusy,
+                label = {
+                    Text(if (currentFolder.isBlank()) "New folder" else "New subfolder")
+                },
+                leadingIcon = {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                },
+            )
+            if (currentFolder.isNotBlank()) {
+                AssistChip(
+                    onClick = { folderActionTarget = currentFolder },
+                    enabled = !isAnyActionBusy,
+                    label = { Text("Folder actions") },
+                    leadingIcon = {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                    },
+                )
+            }
+        }
+
         LazyColumn(
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(
                 start = 16.dp,
-                top = if (availableTags.isEmpty()) 8.dp else 0.dp,
+                top = 0.dp,
                 end = 16.dp,
                 bottom = rootFabContentBottomPadding,
             ),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-        if (currentFolder.isNotEmpty()) {
-            item(key = "..") {
+            if (currentFolder.isNotEmpty()) {
+                item(key = "..") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onCurrentFolderChange(currentFolder.substringBeforeLast('/', ""))
+                            }
+                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Text(
+                            "..",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+
+            items(entries, key = { "${it.isFolder}:${it.nodePath}:${it.openPath}" }) { entry ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            onCurrentFolderChange(currentFolder.substringBeforeLast('/', ""))
+                            if (entry.isFolder) {
+                                onCurrentFolderChange(entry.nodePath)
+                            } else {
+                                entry.openPath?.let(onOpenPage)
+                            }
                         }
                         .padding(vertical = 10.dp, horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
+                        if (entry.isFolder) Icons.Default.FolderOpen else Icons.Default.Description,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (entry.isFolder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(20.dp),
                     )
-                    Text(
-                        "..",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-
-        items(entries, key = { "${it.isFolder}:${it.nodePath}:${it.openPath}" }) { entry ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = entry.name,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
                         if (entry.isFolder) {
-                            onCurrentFolderChange(entry.nodePath)
-                        } else {
-                            entry.openPath?.let(onOpenPage)
+                            Text(
+                                text = "${entry.childCount} items",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
-                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Icon(
-                    if (entry.isFolder) Icons.Default.FolderOpen else Icons.Default.Description,
-                    contentDescription = null,
-                    tint = if (entry.isFolder) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp),
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = entry.name,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
                     if (entry.isFolder) {
+                        IconButton(
+                            onClick = { folderActionTarget = entry.nodePath },
+                            enabled = !isAnyActionBusy,
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "Folder actions",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    } else if (entry.openPath != null) {
+                        IconButton(
+                            onClick = { pageActionTarget = entry.openPath },
+                            enabled = !isAnyActionBusy,
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "Note actions",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (entries.isEmpty()) {
+                item {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        val emptyMessage = when {
+                            currentFolder.isNotEmpty() -> "This folder is empty."
+                            selectedTag.isNotBlank() -> "No pages for this tag."
+                            pages.isEmpty() && folders.isEmpty() -> "No pages or folders loaded."
+                            else -> "No pages loaded."
+                        }
                         Text(
-                            text = "${entry.childCount} items",
-                            style = MaterialTheme.typography.labelSmall,
+                            text = emptyMessage,
+                            style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
         }
-
-            if (entries.isEmpty() && currentFolder.isEmpty() && filteredPages.isEmpty()) {
-            item {
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 32.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        if (pages.isEmpty()) "No pages loaded." else "No pages for this tag.",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-        }
-    }
     }
 }
 
@@ -5295,11 +7718,29 @@ private data class FileTree(
     val pageLookup: Map<String, String> = emptyMap(),
 )
 
-private fun buildFileTree(pages: List<ApiPageSummary>, scopePrefix: String): FileTree {
+private fun buildFileTree(pages: List<ApiPageSummary>, folders: List<String>, scopePrefix: String): FileTree {
     val folderChildren = mutableMapOf<String, MutableSet<String>>()
     val allPages = mutableSetOf<String>()
     val folderPaths = mutableSetOf<String>()
     val pageLookup = mutableMapOf<String, String>()
+    folderChildren.getOrPut("") { mutableSetOf() }
+
+    fun registerFolder(displayFolderPath: String) {
+        val normalizedFolderPath = normalizePagePath(displayFolderPath)
+        if (normalizedFolderPath.isBlank()) return
+        val segments = normalizedFolderPath.split('/')
+        for (i in segments.indices) {
+            val folderPath = segments.take(i + 1).joinToString("/")
+            folderPaths.add(folderPath)
+            val parentPath = if (i == 0) "" else segments.take(i).joinToString("/")
+            folderChildren.getOrPut(parentPath) { mutableSetOf() }.add(folderPath)
+            folderChildren.getOrPut(folderPath) { mutableSetOf() }
+        }
+    }
+
+    folders.forEach { folderPath ->
+        registerFolder(displayPagePath(folderPath, scopePrefix))
+    }
 
     for (page in pages) {
         val displayPath = displayPagePath(page.path, scopePrefix)
@@ -5307,18 +7748,8 @@ private fun buildFileTree(pages: List<ApiPageSummary>, scopePrefix: String): Fil
 
         allPages.add(displayPath)
         pageLookup[displayPath] = page.path
-        val segments = displayPath.split('/')
-
-        // Register all intermediate folder paths
-        for (i in 0 until segments.size - 1) {
-            val folderPath = segments.take(i + 1).joinToString("/")
-            folderPaths.add(folderPath)
-            val parentPath = if (i == 0) "" else segments.take(i).joinToString("/")
-            folderChildren.getOrPut(parentPath) { mutableSetOf() }.add(folderPath)
-        }
-
-        // Register the page itself under its parent folder
-        val parentFolder = if (segments.size > 1) segments.dropLast(1).joinToString("/") else ""
+        val parentFolder = displayPath.substringBeforeLast('/', "")
+        registerFolder(parentFolder)
         folderChildren.getOrPut(parentFolder) { mutableSetOf() }.add(displayPath)
     }
 
@@ -5506,6 +7937,7 @@ private fun SearchScreen(
     onSearchTextChange: (String) -> Unit,
     onClear: () -> Unit,
     onOpenPage: (String) -> Unit,
+    onOpenQuery: (String) -> Unit,
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
 ) {
@@ -5603,7 +8035,55 @@ private fun SearchScreen(
                     }
                 }
 
-                if (results.pages.isEmpty() && results.tasks.isEmpty()) {
+                if (results.queries.isNotEmpty()) {
+                    item { SectionHeader("Queries (${results.queries.size})") }
+                    items(results.queries, key = { "q:${it.name}" }) { query ->
+                        val folderLabel = displayPagePath(query.folder, scopePrefix).ifBlank {
+                            query.folder.ifBlank { "Unfiled" }
+                        }
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onOpenQuery(query.name) },
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = query.title.ifBlank { query.name },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "$folderLabel · ${query.name}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                query.match.takeIf(String::isNotBlank)?.let { match ->
+                                    Text(
+                                        text = match,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                }
+                                if (query.snippet.isNotBlank()) {
+                                    Text(
+                                        text = query.snippet,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (results.pages.isEmpty() && results.tasks.isEmpty() && results.queries.isEmpty()) {
                     item {
                         Box(
                             Modifier
@@ -5717,16 +8197,231 @@ private fun writeSharedImageFile(
 
 // ─── Settings Screen ────────────────────────────────────────────────────
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScreen(
     settings: dev.carnager.noterious.data.AppSettings,
-    onSave: (String, String, String, String, String) -> Unit,
+    vaults: List<VaultRecord>,
+    userSettings: UserSettingsPayload,
+    serverSettings: ServerSettingsResponse?,
+    serverMeta: ServerMetaResponse?,
+    themes: List<ThemeRecord>,
+    isDetailsLoading: Boolean,
+    isThemesLoading: Boolean,
+    isThemeBusy: Boolean,
+    isVaultBusy: Boolean,
+    isUserSettingsSaving: Boolean,
+    onSave: (String, String, String, String, String, String) -> Unit,
+    onRefreshDetails: () -> Unit,
+    onRefreshThemes: () -> Unit,
+    onSaveThemeSelection: (String) -> Unit,
+    onUploadTheme: () -> Unit,
+    onDeleteTheme: (String, (Boolean) -> Unit) -> Unit,
+    onRefreshVaults: () -> Unit,
+    onCreateVault: (String, (VaultRecord?) -> Unit) -> Unit,
+    onRenameVault: (VaultRecord, String, (VaultRecord?) -> Unit) -> Unit,
+    onSelectVault: (VaultRecord) -> Unit,
+    onExportBackupManifest: () -> Unit,
+    onExportBackupScript: () -> Unit,
+    onSaveUserSettings: (String, String, (Boolean) -> Unit) -> Unit,
+    onChangePassword: (String, String, (Boolean) -> Unit) -> Unit,
+    onLogout: ((Boolean) -> Unit) -> Unit,
 ) {
     var serverUrl by rememberSaveable(settings.serverUrl) { mutableStateOf(settings.serverUrl) }
     var scopePrefix by rememberSaveable(settings.scopePrefix) { mutableStateOf(settings.scopePrefix) }
     var username by rememberSaveable(settings.username) { mutableStateOf(settings.username) }
     var password by rememberSaveable(settings.password) { mutableStateOf(settings.password) }
     var bearerToken by rememberSaveable(settings.bearerToken) { mutableStateOf(settings.bearerToken) }
+    var startupTab by rememberSaveable(settings.startupTab) {
+        mutableStateOf(startupTabForValue(settings.startupTab).wireValue)
+    }
+    var ntfyTopicUrl by rememberSaveable(userSettings.notifications.ntfyTopicUrl) {
+        mutableStateOf(userSettings.notifications.ntfyTopicUrl)
+    }
+    var ntfyToken by rememberSaveable(userSettings.notifications.ntfyToken) {
+        mutableStateOf(userSettings.notifications.ntfyToken)
+    }
+    var showChangePasswordSheet by rememberSaveable { mutableStateOf(false) }
+    var currentPassword by rememberSaveable { mutableStateOf("") }
+    var newPassword by rememberSaveable { mutableStateOf("") }
+    var confirmPassword by rememberSaveable { mutableStateOf("") }
+    var authActionError by rememberSaveable { mutableStateOf<String?>(null) }
+    var isAuthActionBusy by rememberSaveable { mutableStateOf(false) }
+    var showThemeLibrarySheet by rememberSaveable { mutableStateOf(false) }
+    var showVaultEditorSheet by rememberSaveable { mutableStateOf(false) }
+    var editingVaultId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var vaultNameDraft by rememberSaveable { mutableStateOf("") }
+    var vaultActionError by rememberSaveable { mutableStateOf<String?>(null) }
+    var isVaultActionBusy by rememberSaveable { mutableStateOf(false) }
+
+    val selectedThemeId = settings.themeId.trim().ifBlank { "system" }
+    val currentSelectedTheme = themes.firstOrNull { theme ->
+        theme.id.equals(selectedThemeId, ignoreCase = true)
+    }
+    val editingVault = vaults.firstOrNull { vault -> vault.id == editingVaultId }
+
+    if (showChangePasswordSheet) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                if (!isAuthActionBusy) {
+                    showChangePasswordSheet = false
+                    authActionError = null
+                }
+            },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .imePadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "Change password",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                AppTextField(
+                    value = currentPassword,
+                    onValueChange = { currentPassword = it },
+                    label = "Current password",
+                    isPassword = true,
+                )
+                AppTextField(
+                    value = newPassword,
+                    onValueChange = { newPassword = it },
+                    label = "New password",
+                    isPassword = true,
+                )
+                AppTextField(
+                    value = confirmPassword,
+                    onValueChange = { confirmPassword = it },
+                    label = "Confirm new password",
+                    isPassword = true,
+                )
+                authActionError?.takeIf(String::isNotBlank)?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    TextButton(
+                        onClick = {
+                            showChangePasswordSheet = false
+                            authActionError = null
+                        },
+                        enabled = !isAuthActionBusy,
+                    ) {
+                        Text("Cancel")
+                    }
+                    Button(
+                        onClick = {
+                            authActionError = when {
+                                currentPassword.isBlank() -> "Current password is required."
+                                newPassword.isBlank() -> "New password is required."
+                                newPassword != confirmPassword -> "New passwords do not match."
+                                else -> null
+                            }
+                            if (authActionError != null) {
+                                return@Button
+                            }
+                            isAuthActionBusy = true
+                            onChangePassword(currentPassword, newPassword) { success ->
+                                isAuthActionBusy = false
+                                if (success) {
+                                    currentPassword = ""
+                                    newPassword = ""
+                                    confirmPassword = ""
+                                    authActionError = null
+                                    showChangePasswordSheet = false
+                                }
+                            }
+                        },
+                        enabled = !isAuthActionBusy,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Update")
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+
+    if (showThemeLibrarySheet) {
+        ThemeLibrarySheet(
+            selectedThemeId = selectedThemeId,
+            themes = themes,
+            isLoading = isThemesLoading,
+            isBusy = isThemeBusy,
+            onDismiss = { showThemeLibrarySheet = false },
+            onRefresh = onRefreshThemes,
+            onSelectTheme = onSaveThemeSelection,
+            onUploadTheme = onUploadTheme,
+            onDeleteTheme = onDeleteTheme,
+        )
+    }
+
+    if (showVaultEditorSheet) {
+        VaultEditorSheet(
+            title = if (editingVault != null) "Rename vault" else "New vault",
+            value = vaultNameDraft,
+            error = vaultActionError,
+            isBusy = isVaultBusy || isVaultActionBusy,
+            onValueChange = {
+                vaultNameDraft = it
+                vaultActionError = null
+            },
+            onDismiss = {
+                if (!isVaultBusy && !isVaultActionBusy) {
+                    showVaultEditorSheet = false
+                    editingVaultId = null
+                    vaultActionError = null
+                }
+            },
+            onConfirm = {
+                val normalizedVaultName = vaultNameDraft.trim()
+                vaultActionError = if (normalizedVaultName.isBlank()) {
+                    "Vault name is required."
+                } else {
+                    null
+                }
+                if (vaultActionError != null) {
+                    return@VaultEditorSheet
+                }
+
+                isVaultActionBusy = true
+                val currentEditingVault = editingVault
+                if (currentEditingVault != null) {
+                    onRenameVault(currentEditingVault, normalizedVaultName) { updatedVault ->
+                        isVaultActionBusy = false
+                        if (updatedVault != null) {
+                            vaultNameDraft = ""
+                            editingVaultId = null
+                            vaultActionError = null
+                            showVaultEditorSheet = false
+                        }
+                    }
+                } else {
+                    onCreateVault(normalizedVaultName) { createdVault ->
+                        isVaultActionBusy = false
+                        if (createdVault != null) {
+                            vaultNameDraft = ""
+                            editingVaultId = null
+                            vaultActionError = null
+                            showVaultEditorSheet = false
+                        }
+                    }
+                }
+            },
+        )
+    }
 
     Column(
         modifier = Modifier
@@ -5735,20 +8430,600 @@ private fun SettingsScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        AppTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = "Server URL")
-        AppTextField(value = scopePrefix, onValueChange = { scopePrefix = it }, label = "Scope Prefix")
-        AppTextField(value = username, onValueChange = { username = it }, label = "Benutzername")
-        AppTextField(value = password, onValueChange = { password = it }, label = "Passwort", isPassword = true)
-        AppTextField(value = bearerToken, onValueChange = { bearerToken = it }, label = "Bearer Token", isPassword = true)
-
-        Spacer(Modifier.height(4.dp))
-
-        Button(
-            onClick = { onSave(serverUrl, scopePrefix, username, password, bearerToken) },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Speichern")
+        SettingsSectionCard(title = "Connection") {
+            AppTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = "Server URL")
+            AppTextField(value = scopePrefix, onValueChange = { scopePrefix = it }, label = "Scope Prefix")
+            AppTextField(value = username, onValueChange = { username = it }, label = "Username")
+            AppTextField(value = password, onValueChange = { password = it }, label = "Password", isPassword = true)
+            AppTextField(value = bearerToken, onValueChange = { bearerToken = it }, label = "Bearer Token", isPassword = true)
+            Text(
+                text = "Open on startup",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StartupTab.entries.forEach { option ->
+                    FilterChip(
+                        selected = startupTab == option.wireValue,
+                        onClick = { startupTab = option.wireValue },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+            Button(
+                onClick = {
+                    onSave(
+                        serverUrl,
+                        scopePrefix,
+                        username,
+                        password,
+                        bearerToken,
+                        startupTabForValue(startupTab).wireValue,
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save")
+            }
         }
+
+        SettingsSectionCard(
+            title = "Appearance",
+            action = {
+                TextButton(
+                    onClick = {
+                        onRefreshThemes()
+                        showThemeLibrarySheet = true
+                    },
+                    enabled = !isThemesLoading && !isThemeBusy,
+                ) {
+                    Text("Library")
+                }
+            },
+        ) {
+            SettingsInfoRow(
+                "Theme",
+                currentSelectedTheme?.name ?: if (selectedThemeId.equals("system", ignoreCase = true)) {
+                    "System default"
+                } else {
+                    "Unavailable ($selectedThemeId)"
+                },
+            )
+            Text(
+                text = "Theme selection is local to this device. Custom themes are shared through the server library.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (isThemesLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Button(
+                onClick = {
+                    onRefreshThemes()
+                    showThemeLibrarySheet = true
+                },
+                enabled = !isThemeBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Choose theme")
+            }
+        }
+
+        SettingsSectionCard(title = "User notifications") {
+            AppTextField(
+                value = ntfyTopicUrl,
+                onValueChange = { ntfyTopicUrl = it },
+                label = "ntfy topic URL",
+            )
+            AppTextField(
+                value = ntfyToken,
+                onValueChange = { ntfyToken = it },
+                label = "ntfy token",
+                isPassword = true,
+            )
+            Button(
+                onClick = {
+                    onSaveUserSettings(ntfyTopicUrl, ntfyToken) { success ->
+                        if (success) {
+                            ntfyTopicUrl = ntfyTopicUrl.trim()
+                            ntfyToken = ntfyToken.trim()
+                        }
+                    }
+                },
+                enabled = !isUserSettingsSaving,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (isUserSettingsSaving) "Saving..." else "Save notifications")
+            }
+        }
+
+        SettingsSectionCard(
+            title = "Vaults",
+            action = {
+                TextButton(onClick = onRefreshVaults, enabled = !isVaultBusy && !isVaultActionBusy) {
+                    Text("Refresh")
+                }
+            },
+        ) {
+            SettingsInfoRow("Current scope", displayCurrentScopeLabel(settings.scopePrefix, vaults))
+            Button(
+                onClick = {
+                    editingVaultId = null
+                    vaultNameDraft = ""
+                    vaultActionError = null
+                    showVaultEditorSheet = true
+                },
+                enabled = !isVaultBusy && !isVaultActionBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("New vault")
+            }
+            if (vaults.isEmpty()) {
+                Text(
+                    text = "No top-level vaults found yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                vaults
+                    .sortedBy { vault -> displayScopeName(vault).lowercase(Locale.ROOT) }
+                    .forEach { vault ->
+                        val isCurrentVault = normalizeScopePrefix(settings.scopePrefix) ==
+                            normalizeScopePrefix(scopePrefixForVault(vault))
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface,
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = displayScopeName(vault),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    text = vault.vaultPath.ifBlank { "Vault path unavailable" },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    if (isCurrentVault) {
+                                        AssistChip(
+                                            onClick = {},
+                                            enabled = false,
+                                            label = { Text("Current") },
+                                        )
+                                    } else {
+                                        TextButton(
+                                            onClick = { onSelectVault(vault) },
+                                            enabled = !isVaultBusy && !isVaultActionBusy,
+                                        ) {
+                                            Text("Use")
+                                        }
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            editingVaultId = vault.id
+                                            vaultNameDraft = displayScopeName(vault)
+                                            vaultActionError = null
+                                            showVaultEditorSheet = true
+                                        },
+                                        enabled = !isVaultBusy && !isVaultActionBusy,
+                                    ) {
+                                        Text("Rename")
+                                    }
+                                }
+                            }
+                        }
+                    }
+            }
+        }
+
+        SettingsSectionCard(
+            title = "Backup",
+            action = {
+                TextButton(onClick = onRefreshDetails, enabled = !isDetailsLoading) {
+                    Text("Refresh")
+                }
+            },
+        ) {
+            if (isDetailsLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            serverMeta?.let { meta ->
+                SettingsInfoRow("Vault root", meta.runtimeVault.vaultPath)
+                SettingsInfoRow("Data dir", meta.dataDir)
+                SettingsInfoRow("Index DB", meta.database)
+                meta.currentVault?.vaultPath?.takeIf(String::isNotBlank)?.let { currentVaultPath ->
+                    SettingsInfoRow("Current scope vault", currentVaultPath)
+                }
+            }
+            Text(
+                text = "The manifest and shell script describe the current deployment. They are helper files, not the backup itself.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onExportBackupManifest,
+                enabled = serverMeta != null,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save backup manifest")
+            }
+            Button(
+                onClick = onExportBackupScript,
+                enabled = serverMeta != null,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save backup script")
+            }
+        }
+
+        SettingsSectionCard(
+            title = "Server runtime",
+            action = {
+                TextButton(onClick = onRefreshDetails, enabled = !isDetailsLoading) {
+                    Text("Refresh")
+                }
+            },
+        ) {
+            if (isDetailsLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            serverSettings?.let { snapshot ->
+                SettingsInfoRow("Vault root", snapshot.settings.vault.vaultPath)
+                SettingsInfoRow("Applied vault", snapshot.appliedVault.vaultPath)
+                SettingsInfoRow("Notification interval", snapshot.settings.notifications.ntfyInterval)
+                SettingsInfoRow("Upload placement", displayUploadPlacement(snapshot.settings.documents.uploadPlacement))
+                snapshot.settings.documents.uploadSubfolder.takeIf(String::isNotBlank)?.let { subfolder ->
+                    SettingsInfoRow("Upload subfolder", subfolder)
+                }
+                SettingsInfoRow("Restart required", if (snapshot.restartRequired) "Yes" else "No")
+                if (snapshot.restartRequiredReasons.isNotEmpty()) {
+                    SettingsInfoRow("Restart reasons", snapshot.restartRequiredReasons.joinToString("\n"))
+                }
+            }
+            serverMeta?.let { meta ->
+                if (serverSettings != null) {
+                    HorizontalDivider()
+                }
+                SettingsInfoRow("Listen address", meta.listenAddr)
+                SettingsInfoRow("Server time", meta.serverTime)
+                SettingsInfoRow("Database", meta.database)
+                SettingsInfoRow("Index", meta.indexStatus.summary)
+                SettingsInfoRow(
+                    "Vault health",
+                    if (meta.vaultHealth.healthy) {
+                        "Healthy"
+                    } else {
+                        listOf("Unhealthy", meta.vaultHealth.reason, meta.vaultHealth.message)
+                            .filter(String::isNotBlank)
+                            .joinToString(" · ")
+                    },
+                )
+                meta.currentVault?.vaultPath?.takeIf(String::isNotBlank)?.let { currentVaultPath ->
+                    SettingsInfoRow("Current scope vault", currentVaultPath)
+                }
+                SettingsInfoRow("Runtime vault", meta.runtimeVault.vaultPath)
+                SettingsInfoRow("Watcher", if (meta.watcherEnabled) meta.watchInterval else "Disabled")
+                SettingsInfoRow(
+                    "Notifications runtime",
+                    if (meta.notificationEnabled) meta.notificationInterval else "Disabled",
+                )
+            }
+            if (!isDetailsLoading && serverSettings == null && serverMeta == null) {
+                Text(
+                    text = "No server details loaded yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        SettingsSectionCard(title = "Session") {
+            Button(
+                onClick = {
+                    authActionError = null
+                    showChangePasswordSheet = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isAuthActionBusy,
+            ) {
+                Text("Change password")
+            }
+
+            TextButton(
+                onClick = {
+                    isAuthActionBusy = true
+                    onLogout { _ ->
+                        isAuthActionBusy = false
+                        showChangePasswordSheet = false
+                        authActionError = null
+                        currentPassword = ""
+                        newPassword = ""
+                        confirmPassword = ""
+                    }
+                },
+                enabled = !isAuthActionBusy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Log out")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ThemeLibrarySheet(
+    selectedThemeId: String,
+    themes: List<ThemeRecord>,
+    isLoading: Boolean,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onSelectTheme: (String) -> Unit,
+    onUploadTheme: () -> Unit,
+    onDeleteTheme: (String, (Boolean) -> Unit) -> Unit,
+) {
+    val selectedCustomTheme = themes.firstOrNull { theme ->
+        theme.id.equals(selectedThemeId, ignoreCase = true) && theme.source.equals("custom", ignoreCase = true)
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Theme library",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "Pick a local app theme or manage the shared server theme library.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (isLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                TextButton(onClick = onRefresh, enabled = !isLoading && !isBusy) {
+                    Text("Refresh")
+                }
+                Button(
+                    onClick = onUploadTheme,
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Upload theme JSON")
+                }
+            }
+
+            ThemeLibraryItem(
+                title = "System default",
+                subtitle = "Use the mobile default theme and follow the system light/dark preference.",
+                selected = selectedThemeId.equals("system", ignoreCase = true),
+                onClick = { onSelectTheme("system") },
+            )
+            themes
+                .sortedBy { theme -> theme.name.lowercase(Locale.ROOT) }
+                .forEach { theme ->
+                    ThemeLibraryItem(
+                        title = theme.name.ifBlank { theme.id },
+                        subtitle = listOf(
+                            themeBadge(theme),
+                            theme.description.takeIf(String::isNotBlank),
+                        ).joinToString(" · "),
+                        selected = theme.id.equals(selectedThemeId, ignoreCase = true),
+                        onClick = { onSelectTheme(theme.id) },
+                    )
+                }
+
+            selectedCustomTheme?.let { theme ->
+                TextButton(
+                    onClick = {
+                        onDeleteTheme(theme.id) { _ -> }
+                    },
+                    enabled = !isBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (isBusy) "Deleting..." else "Delete selected custom theme")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun ThemeLibraryItem(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = if (selected) {
+                MaterialTheme.colorScheme.secondaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VaultEditorSheet(
+    title: String,
+    value: String,
+    error: String?,
+    isBusy: Boolean,
+    onValueChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            AppTextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = "Vault name",
+            )
+            error?.takeIf(String::isNotBlank)?.let { message ->
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                TextButton(onClick = onDismiss, enabled = !isBusy) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = onConfirm,
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (isBusy) "Saving..." else "Save")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+private fun themeBadge(theme: ThemeRecord): String {
+    val source = theme.source.ifBlank { "theme" }.replaceFirstChar { char ->
+        if (char.isLowerCase()) char.titlecase(Locale.ROOT) else char.toString()
+    }
+    val kind = theme.kind.ifBlank { "" }.replaceFirstChar { char ->
+        if (char.isLowerCase()) char.titlecase(Locale.ROOT) else char.toString()
+    }
+    return listOf(source, kind).filter(String::isNotBlank).joinToString(" · ")
+}
+
+@Composable
+private fun SettingsSectionCard(
+    title: String,
+    action: @Composable (() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                action?.invoke()
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SettingsInfoRow(label: String, value: String) {
+    val normalizedValue = value.trim().ifBlank { "Not set" }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = normalizedValue,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+private fun displayUploadPlacement(value: String): String {
+    return when (value.trim()) {
+        "vault-root" -> "Vault root"
+        "note-subfolder" -> "Note subfolder"
+        "same-folder" -> "Same folder"
+        else -> value.ifBlank { "Unknown" }
     }
 }
 

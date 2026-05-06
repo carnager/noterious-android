@@ -20,6 +20,8 @@ data class AppSettings(
     val username: String = "",
     val password: String = "",
     val bearerToken: String = "",
+    val startupTab: String = "pages",
+    val themeId: String = "system",
 )
 
 class SettingsRepository(private val context: Context) {
@@ -29,6 +31,8 @@ class SettingsRepository(private val context: Context) {
         val Username = stringPreferencesKey("username")
         val Password = stringPreferencesKey("password")
         val BearerToken = stringPreferencesKey("bearer_token")
+        val StartupTab = stringPreferencesKey("startup_tab")
+        val ThemeId = stringPreferencesKey("theme_id")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data
@@ -46,6 +50,8 @@ class SettingsRepository(private val context: Context) {
                 username = preferences[Keys.Username].orEmpty(),
                 password = preferences[Keys.Password].orEmpty(),
                 bearerToken = preferences[Keys.BearerToken].orEmpty(),
+                startupTab = normalizeStartupTab(preferences[Keys.StartupTab]),
+                themeId = normalizeThemeId(preferences[Keys.ThemeId]),
             )
         }
 
@@ -56,6 +62,24 @@ class SettingsRepository(private val context: Context) {
             preferences[Keys.Username] = settings.username.trim()
             preferences[Keys.Password] = settings.password
             preferences[Keys.BearerToken] = settings.bearerToken.trim()
+            preferences[Keys.StartupTab] = normalizeStartupTab(settings.startupTab)
+            preferences[Keys.ThemeId] = normalizeThemeId(settings.themeId)
+        }
+    }
+
+    private fun normalizeStartupTab(value: String?): String {
+        return when (value?.trim()?.lowercase()) {
+            "tasks" -> "tasks"
+            else -> "pages"
+        }
+    }
+
+    private fun normalizeThemeId(value: String?): String {
+        val normalized = value?.trim().orEmpty()
+        return if (normalized.isBlank() || normalized.equals("system", ignoreCase = true)) {
+            "system"
+        } else {
+            normalized
         }
     }
 }
