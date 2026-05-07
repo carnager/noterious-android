@@ -52,9 +52,9 @@ internal enum class NoteSlashCommand {
 internal sealed interface NoteEditorBlock {
     data class Heading(val level: Int, val text: String) : NoteEditorBlock
     data class Paragraph(val text: String) : NoteEditorBlock
-    data class BulletItem(val text: String) : NoteEditorBlock
-    data class NumberedItem(val number: Int, val text: String) : NoteEditorBlock
-    data class TaskItem(val checked: Boolean, val text: String) : NoteEditorBlock
+    data class BulletItem(val text: String, val indent: String = "") : NoteEditorBlock
+    data class NumberedItem(val number: Int, val text: String, val indent: String = "") : NoteEditorBlock
+    data class TaskItem(val checked: Boolean, val text: String, val indent: String = "") : NoteEditorBlock
     data class BlockQuote(val text: String) : NoteEditorBlock
     data class CodeFence(val text: String, val language: String = "") : NoteEditorBlock
     data class Table(val headers: List<String>, val rows: List<List<String>>) : NoteEditorBlock
@@ -70,6 +70,16 @@ internal data class ParsedNoteEditorBlock(
     val block: NoteEditorBlock,
     val startLine: Int,
     val endLine: Int,
+)
+
+private data class EditorIndentedCodeBlock(
+    val text: String,
+    val endLineIndex: Int,
+)
+
+private data class EditorHtmlBlock(
+    val text: String,
+    val endLineIndex: Int,
 )
 
 internal fun splitMarkdownFrontmatter(markdown: String): MarkdownFrontmatterSplit {
@@ -192,6 +202,19 @@ internal fun parseNoteEditorBlocksWithLines(markdown: String): List<ParsedNoteEd
             continue
         }
 
+        val detailsBlock = editorDetailsBlockAt(lines, index)
+        if (detailsBlock != null) {
+            flushParagraph()
+            flushBlockQuote()
+            blocks += ParsedNoteEditorBlock(
+                block = NoteEditorBlock.Paragraph(detailsBlock.text),
+                startLine = index + 1,
+                endLine = detailsBlock.endLineIndex + 1,
+            )
+            index = detailsBlock.endLineIndex + 1
+            continue
+        }
+
         if (trimmedLine.isBlank()) {
             flushParagraph()
             flushBlockQuote()
@@ -209,6 +232,22 @@ internal fun parseNoteEditorBlocksWithLines(markdown: String): List<ParsedNoteEd
                 endLine = tableBlock.endLineIndex + 1,
             )
             index = tableBlock.endLineIndex + 1
+            continue
+        }
+
+        val standaloneImage = standaloneEditorImageMatch(trimmedLine)
+        if (standaloneImage != null) {
+            flushParagraph()
+            flushBlockQuote()
+            blocks += ParsedNoteEditorBlock(
+                block = NoteEditorBlock.Image(
+                    alt = standaloneImage.alt,
+                    target = standaloneImage.target,
+                ),
+                startLine = index + 1,
+                endLine = index + 1,
+            )
+            index += 1
             continue
         }
 
@@ -235,11 +274,15 @@ internal fun parseNoteEditorBlocksWithLines(markdown: String): List<ParsedNoteEd
             continue
         }
 
-        val task = editorTaskMatch(trimmedLine)
+        val task = editorTaskMatch(rawLine)
         if (task != null) {
             flushParagraph()
             blocks += ParsedNoteEditorBlock(
-                block = NoteEditorBlock.TaskItem(checked = task.first, text = task.second),
+                block = NoteEditorBlock.TaskItem(
+                    checked = task.checked,
+                    text = task.text,
+                    indent = task.indent,
+                ),
                 startLine = index + 1,
                 endLine = index + 1,
             )
@@ -247,11 +290,14 @@ internal fun parseNoteEditorBlocksWithLines(markdown: String): List<ParsedNoteEd
             continue
         }
 
-        val bullet = editorBulletMatch(trimmedLine)
+        val bullet = editorBulletMatch(rawLine)
         if (bullet != null) {
             flushParagraph()
             blocks += ParsedNoteEditorBlock(
-                block = NoteEditorBlock.BulletItem(text = bullet),
+                block = NoteEditorBlock.BulletItem(
+                    text = bullet.text,
+                    indent = bullet.indent,
+                ),
                 startLine = index + 1,
                 endLine = index + 1,
             )
@@ -259,22 +305,41 @@ internal fun parseNoteEditorBlocksWithLines(markdown: String): List<ParsedNoteEd
             continue
         }
 
-        val numbered = editorNumberedMatch(trimmedLine)
+        val numbered = editorNumberedMatch(rawLine)
         if (numbered != null) {
             flushParagraph()
             blocks += ParsedNoteEditorBlock(
-                block = NoteEditorBlock.NumberedItem(number = numbered.first, text = numbered.second),
+                block = NoteEditorBlock.NumberedItem(
+                    number = numbered.number,
+                    text = numbered.text,
+                    indent = numbered.indent,
+                ),
                 startLine = index + 1,
                 endLine = index + 1,
             )
             index += 1
+            continue
+        }
+
+        val indentedCode = editorIndentedCodeBlockAt(lines, index)
+        if (indentedCode != null) {
+            flushParagraph()
+            blocks += ParsedNoteEditorBlock(
+                block = NoteEditorBlock.CodeFence(
+                    text = indentedCode.text,
+                    language = "",
+                ),
+                startLine = index + 1,
+                endLine = indentedCode.endLineIndex + 1,
+            )
+            index = indentedCode.endLineIndex + 1
             continue
         }
 
         if (paragraphStartLine == -1) {
             paragraphStartLine = index + 1
         }
-        paragraph += trimmedLine
+        paragraph += rawLine.trimStart()
         index += 1
     }
 
@@ -659,10 +724,100 @@ private data class EditorTableBlock(
     val endLineIndex: Int,
 )
 
+private data class EditorTaskMatch(
+    val checked: Boolean,
+    val text: String,
+    val indent: String,
+)
+
+private data class EditorBulletMatch(
+    val text: String,
+    val indent: String,
+)
+
+private data class EditorNumberedMatch(
+    val number: Int,
+    val text: String,
+    val indent: String,
+)
+
 private data class EditorImageMatch(
     val alt: String,
     val target: String,
 )
+
+private fun editorDetailsBlockAt(lines: List<String>, startLineIndex: Int): EditorHtmlBlock? {
+    if (startLineIndex !in lines.indices) return null
+    val opening = lines[startLineIndex].trim()
+    if (!Regex("""^<details(?:\s+open)?\s*>$""", RegexOption.IGNORE_CASE).matches(opening)) {
+        return null
+    }
+
+    var endLineIndex = -1
+    var index = startLineIndex + 1
+    while (index < lines.size) {
+        if (lines[index].trim().equals("</details>", ignoreCase = true)) {
+            endLineIndex = index
+            break
+        }
+        index += 1
+    }
+    if (endLineIndex == -1) {
+        return null
+    }
+
+    return EditorHtmlBlock(
+        text = lines.subList(startLineIndex, endLineIndex + 1).joinToString("\n").trimEnd(),
+        endLineIndex = endLineIndex,
+    )
+}
+
+private fun editorIndentedCodeBlockAt(lines: List<String>, startLineIndex: Int): EditorIndentedCodeBlock? {
+    if (startLineIndex !in lines.indices || !looksLikeIndentedCodeLine(lines[startLineIndex])) {
+        return null
+    }
+
+    val content = mutableListOf<String>()
+    var index = startLineIndex
+    var endLineIndex = startLineIndex
+    while (index < lines.size) {
+        val rawLine = lines[index].trimEnd('\r')
+        when {
+            rawLine.isBlank() -> {
+                content += ""
+                endLineIndex = index
+                index += 1
+            }
+            looksLikeIndentedCodeLine(rawLine) -> {
+                content += stripIndentedCodePrefix(rawLine)
+                endLineIndex = index
+                index += 1
+            }
+            else -> break
+        }
+    }
+
+    while (content.isNotEmpty() && content.last().isBlank()) {
+        content.removeLast()
+    }
+
+    return EditorIndentedCodeBlock(
+        text = content.joinToString("\n"),
+        endLineIndex = endLineIndex,
+    )
+}
+
+private fun looksLikeIndentedCodeLine(line: String): Boolean {
+    return line.startsWith("\t") || line.startsWith("    ")
+}
+
+private fun stripIndentedCodePrefix(line: String): String {
+    return when {
+        line.startsWith("\t") -> line.removePrefix("\t")
+        line.startsWith("    ") -> line.drop(4)
+        else -> line
+    }
+}
 
 private fun editorHeadingMatch(line: String): Pair<Int, String>? {
     val hashes = line.takeWhile { it == '#' }
@@ -672,25 +827,30 @@ private fun editorHeadingMatch(line: String): Pair<Int, String>? {
     return hashes.length to text
 }
 
-private fun editorTaskMatch(line: String): Pair<Boolean, String>? {
-    val match = Regex("""^[-*+]\s+\[([ xX])]\s+(.*)$""").matchEntire(line) ?: return null
-    return (match.groupValues[1].equals("x", ignoreCase = true)) to match.groupValues[2].trim()
+private fun editorTaskMatch(line: String): EditorTaskMatch? {
+    val match = Regex("""^([ \t]*)[-*+]\s+\[([ xX])]\s+(.*)$""").matchEntire(line) ?: return null
+    return EditorTaskMatch(
+        checked = match.groupValues[2].equals("x", ignoreCase = true),
+        text = match.groupValues[3].trim(),
+        indent = match.groupValues[1],
+    )
 }
 
-private fun editorBulletMatch(line: String): String? {
-    return when {
-        line.startsWith("- ") -> line.removePrefix("- ").trim()
-        line.startsWith("* ") -> line.removePrefix("* ").trim()
-        line.startsWith("+ ") -> line.removePrefix("+ ").trim()
-        else -> null
-    }
+private fun editorBulletMatch(line: String): EditorBulletMatch? {
+    val match = Regex("""^([ \t]*)[-*+]\s+(.*)$""").matchEntire(line) ?: return null
+    return EditorBulletMatch(
+        text = match.groupValues[2].trim(),
+        indent = match.groupValues[1],
+    )
 }
 
-private fun editorNumberedMatch(line: String): Pair<Int, String>? {
-    val dotIndex = line.indexOf(". ")
-    if (dotIndex <= 0) return null
-    val number = line.substring(0, dotIndex).toIntOrNull() ?: return null
-    return number to line.substring(dotIndex + 2).trim()
+private fun editorNumberedMatch(line: String): EditorNumberedMatch? {
+    val match = Regex("""^([ \t]*)(\d+)\.\s+(.*)$""").matchEntire(line) ?: return null
+    return EditorNumberedMatch(
+        number = match.groupValues[2].toIntOrNull() ?: return null,
+        text = match.groupValues[3].trim(),
+        indent = match.groupValues[1],
+    )
 }
 
 private fun standaloneEditorImageMatch(text: String): EditorImageMatch? {
@@ -780,9 +940,9 @@ internal fun blockToMarkdown(block: NoteEditorBlock): String {
     return when (block) {
         is NoteEditorBlock.Heading -> "${"#".repeat(block.level.coerceIn(1, 6))} ${block.text.trim()}"
         is NoteEditorBlock.Paragraph -> block.text.trimEnd()
-        is NoteEditorBlock.BulletItem -> "- ${block.text.trimEnd()}"
-        is NoteEditorBlock.NumberedItem -> "${block.number}. ${block.text.trimEnd()}"
-        is NoteEditorBlock.TaskItem -> "- [${if (block.checked) "x" else " "}] ${block.text.trimEnd()}"
+        is NoteEditorBlock.BulletItem -> "${block.indent}- ${block.text.trimEnd()}"
+        is NoteEditorBlock.NumberedItem -> "${block.indent}${block.number}. ${block.text.trimEnd()}"
+        is NoteEditorBlock.TaskItem -> "${block.indent}- [${if (block.checked) "x" else " "}] ${block.text.trimEnd()}"
         is NoteEditorBlock.BlockQuote -> block.text
             .replace("\r\n", "\n")
             .split('\n')

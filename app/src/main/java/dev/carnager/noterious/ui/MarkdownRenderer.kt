@@ -5,12 +5,14 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -18,15 +20,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -40,10 +47,12 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.BaselineShift
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import dev.carnager.noterious.data.AppSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -69,9 +78,13 @@ fun MarkdownContent(
     settings: AppSettings,
     modifier: Modifier = Modifier,
     hideQueryFences: Boolean = false,
+    linkDefinitions: Map<String, String>? = null,
     onLinkClick: ((String) -> Unit)? = null,
     onImageClick: ((MarkdownImageTarget) -> Unit)? = null,
 ) {
+    val effectiveLinkDefinitions = remember(markdown, linkDefinitions) {
+        linkDefinitions ?: extractMarkdownReferenceDefinitions(stripFrontmatter(markdown))
+    }
     val blocks = remember(markdown, hideQueryFences) {
         parseMarkdownBlocks(stripFrontmatter(markdown), hideQueryFences = hideQueryFences)
     }
@@ -82,14 +95,21 @@ fun MarkdownContent(
     ) {
         blocks.forEach { block ->
             when (block) {
-                is MarkdownBlock.Heading -> MarkdownHeading(block, onLinkClick)
-                is MarkdownBlock.Paragraph -> MarkdownParagraph(block, onLinkClick)
-                is MarkdownBlock.BulletItem -> MarkdownBulletItem(block, onLinkClick)
-                is MarkdownBlock.NumberedItem -> MarkdownNumberedItem(block, onLinkClick)
-                is MarkdownBlock.TaskItem -> MarkdownTaskItem(block, onLinkClick)
-                is MarkdownBlock.BlockQuote -> MarkdownBlockQuote(block, onLinkClick)
+                is MarkdownBlock.Heading -> MarkdownHeading(block, effectiveLinkDefinitions, onLinkClick)
+                is MarkdownBlock.Paragraph -> MarkdownParagraph(block, effectiveLinkDefinitions, onLinkClick)
+                is MarkdownBlock.BulletItem -> MarkdownBulletItem(block, effectiveLinkDefinitions, onLinkClick)
+                is MarkdownBlock.NumberedItem -> MarkdownNumberedItem(block, effectiveLinkDefinitions, onLinkClick)
+                is MarkdownBlock.TaskItem -> MarkdownTaskItem(block, effectiveLinkDefinitions, onLinkClick)
+                is MarkdownBlock.BlockQuote -> MarkdownBlockQuote(
+                    block = block,
+                    currentPagePath = currentPagePath,
+                    settings = settings,
+                    linkDefinitions = effectiveLinkDefinitions,
+                    onLinkClick = onLinkClick,
+                    onImageClick = onImageClick,
+                )
                 is MarkdownBlock.CodeFence -> MarkdownCodeFence(block)
-                is MarkdownBlock.Table -> MarkdownTableBlock(block, onLinkClick)
+                is MarkdownBlock.Table -> MarkdownTableBlock(block, effectiveLinkDefinitions, onLinkClick)
                 is MarkdownBlock.Image -> MarkdownImageBlock(
                     block = block,
                     currentPagePath = currentPagePath,
@@ -97,13 +117,41 @@ fun MarkdownContent(
                     onLinkClick = onLinkClick,
                     onImageClick = onImageClick,
                 )
+                is MarkdownBlock.Details -> MarkdownDetailsBlock(
+                    block = block,
+                    currentPagePath = currentPagePath,
+                    settings = settings,
+                    linkDefinitions = effectiveLinkDefinitions,
+                    onLinkClick = onLinkClick,
+                    onImageClick = onImageClick,
+                )
+                is MarkdownBlock.FootnoteDefinitions -> MarkdownFootnoteDefinitions(
+                    block = block,
+                    linkDefinitions = effectiveLinkDefinitions,
+                    onLinkClick = onLinkClick,
+                )
+                is MarkdownBlock.DefinitionList -> MarkdownDefinitionList(
+                    title = "Definitions",
+                    block = block,
+                    linkDefinitions = effectiveLinkDefinitions,
+                    onLinkClick = onLinkClick,
+                )
+                is MarkdownBlock.AbbreviationList -> MarkdownAbbreviationList(
+                    block = block,
+                    linkDefinitions = effectiveLinkDefinitions,
+                    onLinkClick = onLinkClick,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun MarkdownHeading(block: MarkdownBlock.Heading, onLinkClick: ((String) -> Unit)?) {
+private fun MarkdownHeading(
+    block: MarkdownBlock.Heading,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
     val linkColor = MaterialTheme.colorScheme.primary
     val style = when (block.level) {
         1 -> MaterialTheme.typography.headlineSmall
@@ -112,7 +160,7 @@ private fun MarkdownHeading(block: MarkdownBlock.Heading, onLinkClick: ((String)
         else -> MaterialTheme.typography.titleSmall
     }
     MarkdownText(
-        text = parseInlineMarkdown(block.text, linkColor),
+        text = parseInlineMarkdown(block.text, linkColor, linkDefinitions),
         style = style,
         color = MaterialTheme.colorScheme.onSurface,
         fontWeight = FontWeight.SemiBold,
@@ -121,10 +169,14 @@ private fun MarkdownHeading(block: MarkdownBlock.Heading, onLinkClick: ((String)
 }
 
 @Composable
-private fun MarkdownParagraph(block: MarkdownBlock.Paragraph, onLinkClick: ((String) -> Unit)?) {
+private fun MarkdownParagraph(
+    block: MarkdownBlock.Paragraph,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
     val linkColor = MaterialTheme.colorScheme.primary
     MarkdownText(
-        text = parseInlineMarkdown(block.text, linkColor),
+        text = parseInlineMarkdown(block.text, linkColor, linkDefinitions),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurface,
         onLinkClick = onLinkClick,
@@ -132,9 +184,18 @@ private fun MarkdownParagraph(block: MarkdownBlock.Paragraph, onLinkClick: ((Str
 }
 
 @Composable
-private fun MarkdownBulletItem(block: MarkdownBlock.BulletItem, onLinkClick: ((String) -> Unit)?) {
+private fun MarkdownBulletItem(
+    block: MarkdownBlock.BulletItem,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
     val linkColor = MaterialTheme.colorScheme.primary
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = markdownListStartPadding(block.indent)),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Text(
             text = "\u2022",
             style = MaterialTheme.typography.bodyMedium,
@@ -142,7 +203,7 @@ private fun MarkdownBulletItem(block: MarkdownBlock.BulletItem, onLinkClick: ((S
             fontWeight = FontWeight.Bold,
         )
         MarkdownText(
-            text = parseInlineMarkdown(block.text, linkColor),
+            text = parseInlineMarkdown(block.text, linkColor, linkDefinitions),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
@@ -152,9 +213,18 @@ private fun MarkdownBulletItem(block: MarkdownBlock.BulletItem, onLinkClick: ((S
 }
 
 @Composable
-private fun MarkdownNumberedItem(block: MarkdownBlock.NumberedItem, onLinkClick: ((String) -> Unit)?) {
+private fun MarkdownNumberedItem(
+    block: MarkdownBlock.NumberedItem,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
     val linkColor = MaterialTheme.colorScheme.primary
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = markdownListStartPadding(block.indent)),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Text(
             text = "${block.number}.",
             style = MaterialTheme.typography.bodyMedium,
@@ -162,7 +232,7 @@ private fun MarkdownNumberedItem(block: MarkdownBlock.NumberedItem, onLinkClick:
             fontWeight = FontWeight.SemiBold,
         )
         MarkdownText(
-            text = parseInlineMarkdown(block.text, linkColor),
+            text = parseInlineMarkdown(block.text, linkColor, linkDefinitions),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
@@ -172,9 +242,16 @@ private fun MarkdownNumberedItem(block: MarkdownBlock.NumberedItem, onLinkClick:
 }
 
 @Composable
-private fun MarkdownTaskItem(block: MarkdownBlock.TaskItem, onLinkClick: ((String) -> Unit)?) {
+private fun MarkdownTaskItem(
+    block: MarkdownBlock.TaskItem,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
     val linkColor = MaterialTheme.colorScheme.primary
     Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = markdownListStartPadding(block.indent)),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.Top,
     ) {
@@ -184,7 +261,7 @@ private fun MarkdownTaskItem(block: MarkdownBlock.TaskItem, onLinkClick: ((Strin
             tint = if (block.checked) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline,
         )
         MarkdownText(
-            text = parseInlineMarkdown(block.text, linkColor),
+            text = parseInlineMarkdown(block.text, linkColor, linkDefinitions),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
@@ -194,53 +271,52 @@ private fun MarkdownTaskItem(block: MarkdownBlock.TaskItem, onLinkClick: ((Strin
 }
 
 @Composable
-private fun MarkdownBlockQuote(block: MarkdownBlock.BlockQuote, onLinkClick: ((String) -> Unit)?) {
-    val linkColor = MaterialTheme.colorScheme.primary
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.16f),
-                shape = RoundedCornerShape(24.dp),
-            )
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+private fun MarkdownBlockQuote(
+    block: MarkdownBlock.BlockQuote,
+    currentPagePath: String,
+    settings: AppSettings,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+    onImageClick: ((MarkdownImageTarget) -> Unit)?,
+) {
+    val callout = remember(block.text) { parseMarkdownCallout(block.text) }
+    val containerColor = when (callout?.type) {
+        MarkdownCalloutType.Note -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+        MarkdownCalloutType.Tip -> Color(0x1A2E7D32)
+        MarkdownCalloutType.Important -> Color(0x1A1565C0)
+        MarkdownCalloutType.Warning -> Color(0x1AF57C00)
+        MarkdownCalloutType.Caution -> Color(0x1AB71C1C)
+        null -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f)
+    }
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = containerColor,
+        ),
+        shape = RoundedCornerShape(24.dp),
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(
-            text = "“",
-            style = MaterialTheme.typography.displaySmall.copy(fontFamily = FontFamily.Serif),
-            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.8f),
-            modifier = Modifier.align(Alignment.TopStart),
-        )
-        MarkdownText(
-            text = parseInlineMarkdown(block.text, linkColor),
-            style = MaterialTheme.typography.titleMedium.copy(
-                fontFamily = FontFamily.Serif,
-                fontStyle = FontStyle.Italic,
-                lineHeight = 30.sp,
-            ),
-            color = MaterialTheme.colorScheme.onSurface,
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 26.dp, top = 8.dp, end = 22.dp, bottom = 14.dp),
-            onLinkClick = onLinkClick,
-        )
-        Text(
-            text = "”",
-            style = MaterialTheme.typography.headlineMedium.copy(fontFamily = FontFamily.Serif),
-            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f),
-            modifier = Modifier.align(Alignment.BottomEnd),
-        )
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 26.dp)
-                .width(48.dp)
-                .height(2.dp)
-                .background(
-                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.35f),
-                    shape = RoundedCornerShape(999.dp),
-                ),
-        )
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = callout?.type?.label ?: "Quote",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = callout?.type?.accentColor ?: MaterialTheme.colorScheme.secondary,
+            )
+            MarkdownContent(
+                markdown = callout?.body ?: block.text,
+                currentPagePath = currentPagePath,
+                settings = settings,
+                modifier = Modifier.fillMaxWidth(),
+                linkDefinitions = linkDefinitions,
+                onLinkClick = onLinkClick,
+                onImageClick = onImageClick,
+            )
+        }
     }
 }
 
@@ -249,6 +325,9 @@ private fun MarkdownCodeFence(block: MarkdownBlock.CodeFence) {
     Text(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(max = 320.dp)
+            .verticalScroll(rememberScrollState())
+            .horizontalScroll(rememberScrollState())
             .background(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
                 shape = RoundedCornerShape(14.dp),
@@ -258,12 +337,18 @@ private fun MarkdownCodeFence(block: MarkdownBlock.CodeFence) {
         style = MaterialTheme.typography.bodySmall,
         fontFamily = FontFamily.Monospace,
         color = MaterialTheme.colorScheme.onSurface,
+        softWrap = false,
     )
 }
 
 @Composable
-private fun MarkdownTableBlock(block: MarkdownBlock.Table, onLinkClick: ((String) -> Unit)?) {
+private fun MarkdownTableBlock(
+    block: MarkdownBlock.Table,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
     val linkColor = MaterialTheme.colorScheme.primary
+    val scrollState = rememberScrollState()
     val columnCount = remember(block) {
         maxOf(block.headers.size, block.rows.maxOfOrNull { it.size } ?: 0)
     }
@@ -284,10 +369,17 @@ private fun MarkdownTableBlock(block: MarkdownBlock.Table, onLinkClick: ((String
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(0.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (columnCount > 2 || scrollState.maxValue > 0) {
+                Text(
+                    text = "Swipe for more columns ->",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Column(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                modifier = Modifier.horizontalScroll(scrollState),
                 verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 Row(
@@ -345,7 +437,11 @@ private fun MarkdownTableBlock(block: MarkdownBlock.Table, onLinkClick: ((String
                     ) {
                         headers.indices.forEach { index ->
                             MarkdownText(
-                                text = parseInlineMarkdown(row.getOrElse(index) { "" }.ifBlank { "\u2014" }, linkColor),
+                                text = parseInlineMarkdown(
+                                    row.getOrElse(index) { "" }.ifBlank { "\u2014" },
+                                    linkColor,
+                                    linkDefinitions,
+                                ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier
@@ -356,6 +452,66 @@ private fun MarkdownTableBlock(block: MarkdownBlock.Table, onLinkClick: ((String
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownDetailsBlock(
+    block: MarkdownBlock.Details,
+    currentPagePath: String,
+    settings: AppSettings,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+    onImageClick: ((MarkdownImageTarget) -> Unit)?,
+) {
+    var expanded by remember(block.summary, block.body) { mutableStateOf(false) }
+    val linkColor = MaterialTheme.colorScheme.primary
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MarkdownText(
+                    text = parseInlineMarkdown(block.summary, linkColor, linkDefinitions),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                    onLinkClick = onLinkClick,
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse details" else "Expand details",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (expanded) {
+                MarkdownContent(
+                    markdown = block.body,
+                    currentPagePath = currentPagePath,
+                    settings = settings,
+                    modifier = Modifier.fillMaxWidth(),
+                    linkDefinitions = linkDefinitions,
+                    onLinkClick = onLinkClick,
+                    onImageClick = onImageClick,
+                )
             }
         }
     }
@@ -433,6 +589,125 @@ private fun MarkdownImageBlock(
 }
 
 @Composable
+private fun MarkdownFootnoteDefinitions(
+    block: MarkdownBlock.FootnoteDefinitions,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
+    val linkColor = MaterialTheme.colorScheme.primary
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "Footnotes",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+            block.items.forEach { item ->
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "[${item.label}]",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    MarkdownText(
+                        text = parseInlineMarkdown(item.text, linkColor, linkDefinitions),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f),
+                        onLinkClick = onLinkClick,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownDefinitionList(
+    title: String,
+    block: MarkdownBlock.DefinitionList,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
+    val linkColor = MaterialTheme.colorScheme.primary
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+            block.items.forEach { item ->
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MarkdownText(
+                        text = parseInlineMarkdown(item.term, linkColor, linkDefinitions),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold,
+                        onLinkClick = onLinkClick,
+                    )
+                    item.definitions.forEach { definition ->
+                        MarkdownText(
+                            text = parseInlineMarkdown(definition, linkColor, linkDefinitions),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 12.dp),
+                            onLinkClick = onLinkClick,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownAbbreviationList(
+    block: MarkdownBlock.AbbreviationList,
+    linkDefinitions: Map<String, String>,
+    onLinkClick: ((String) -> Unit)?,
+) {
+    MarkdownDefinitionList(
+        title = "Glossary",
+        block = MarkdownBlock.DefinitionList(
+            items = block.items.map { item ->
+                MarkdownDefinitionListItem(
+                    term = item.abbreviation,
+                    definitions = listOf(item.expansion),
+                )
+            },
+        ),
+        linkDefinitions = linkDefinitions,
+        onLinkClick = onLinkClick,
+    )
+}
+
+@Composable
 internal fun MarkdownText(
     text: AnnotatedString,
     style: TextStyle,
@@ -484,13 +759,17 @@ internal fun MarkdownText(
 private sealed interface MarkdownBlock {
     data class Heading(val level: Int, val text: String) : MarkdownBlock
     data class Paragraph(val text: String) : MarkdownBlock
-    data class BulletItem(val text: String) : MarkdownBlock
-    data class NumberedItem(val number: Int, val text: String) : MarkdownBlock
-    data class TaskItem(val checked: Boolean, val text: String) : MarkdownBlock
+    data class BulletItem(val text: String, val indent: String = "") : MarkdownBlock
+    data class NumberedItem(val number: Int, val text: String, val indent: String = "") : MarkdownBlock
+    data class TaskItem(val checked: Boolean, val text: String, val indent: String = "") : MarkdownBlock
     data class BlockQuote(val text: String) : MarkdownBlock
     data class CodeFence(val text: String, val language: String = "") : MarkdownBlock
     data class Table(val headers: List<String>, val rows: List<List<String>>) : MarkdownBlock
     data class Image(val alt: String, val target: String) : MarkdownBlock
+    data class Details(val summary: String, val body: String) : MarkdownBlock
+    data class FootnoteDefinitions(val items: List<MarkdownFootnoteDefinition>) : MarkdownBlock
+    data class DefinitionList(val items: List<MarkdownDefinitionListItem>) : MarkdownBlock
+    data class AbbreviationList(val items: List<MarkdownAbbreviationDefinition>) : MarkdownBlock
 }
 
 private data class ParsedTableBlock(
@@ -499,9 +778,68 @@ private data class ParsedTableBlock(
     val endLineIndex: Int,
 )
 
+private data class ParsedIndentedCodeBlock(
+    val text: String,
+    val endLineIndex: Int,
+)
+
+private data class ParsedDetailsBlock(
+    val summary: String,
+    val body: String,
+    val endLineIndex: Int,
+)
+
+private data class MarkdownTaskMatch(
+    val checked: Boolean,
+    val text: String,
+    val indent: String,
+)
+
+private data class MarkdownBulletMatch(
+    val text: String,
+    val indent: String,
+)
+
+private data class MarkdownNumberedMatch(
+    val number: Int,
+    val text: String,
+    val indent: String,
+)
+
 internal data class ImageRequestSpec(
     val url: String,
     val includeAuthorization: Boolean,
+)
+
+private data class MarkdownFootnoteDefinition(
+    val label: String,
+    val text: String,
+)
+
+private data class MarkdownDefinitionListItem(
+    val term: String,
+    val definitions: List<String>,
+)
+
+private data class MarkdownAbbreviationDefinition(
+    val abbreviation: String,
+    val expansion: String,
+)
+
+private enum class MarkdownCalloutType(
+    val label: String,
+    val accentColor: Color,
+) {
+    Note("Note", Color(0xFF1565C0)),
+    Tip("Tip", Color(0xFF2E7D32)),
+    Important("Important", Color(0xFF512DA8)),
+    Warning("Warning", Color(0xFFF57C00)),
+    Caution("Caution", Color(0xFFC62828)),
+}
+
+private data class MarkdownCallout(
+    val type: MarkdownCalloutType,
+    val body: String,
 )
 
 private fun stripFrontmatter(markdown: String): String {
@@ -527,6 +865,25 @@ private fun parseMarkdownBlocks(markdown: String, hideQueryFences: Boolean): Lis
         paragraph.clear()
         standaloneImageMatch(text)?.let { image ->
             blocks += MarkdownBlock.Image(alt = image.alt, target = image.target)
+            return
+        }
+        parseFootnoteDefinitions(text)?.takeIf { it.isNotEmpty() }?.let { items ->
+            blocks += MarkdownBlock.FootnoteDefinitions(items)
+            return
+        }
+        parseMarkdownDefinitionList(text)?.takeIf { it.isNotEmpty() }?.let { items ->
+            blocks += MarkdownBlock.DefinitionList(items)
+            return
+        }
+        parseHtmlDefinitionList(text)?.takeIf { it.isNotEmpty() }?.let { items ->
+            blocks += MarkdownBlock.DefinitionList(items)
+            return
+        }
+        parseMarkdownAbbreviationDefinitions(text)?.takeIf { it.isNotEmpty() }?.let { items ->
+            blocks += MarkdownBlock.AbbreviationList(items)
+            return
+        }
+        if (isMarkdownReferenceDefinitionParagraph(text)) {
             return
         }
         blocks += MarkdownBlock.Paragraph(text)
@@ -576,6 +933,18 @@ private fun parseMarkdownBlocks(markdown: String, hideQueryFences: Boolean): Lis
             continue
         }
 
+        val detailsBlock = markdownDetailsBlockAt(lines, index)
+        if (detailsBlock != null) {
+            flushParagraph()
+            flushBlockQuote()
+            blocks += MarkdownBlock.Details(
+                summary = detailsBlock.summary,
+                body = detailsBlock.body,
+            )
+            index = detailsBlock.endLineIndex + 1
+            continue
+        }
+
         if (trimmedLine.isBlank()) {
             flushParagraph()
             flushBlockQuote()
@@ -589,6 +958,18 @@ private fun parseMarkdownBlocks(markdown: String, hideQueryFences: Boolean): Lis
             flushBlockQuote()
             blocks += MarkdownBlock.Table(headers = table.headers, rows = table.rows)
             index = table.endLineIndex + 1
+            continue
+        }
+
+        val standaloneImage = standaloneImageMatch(trimmedLine)
+        if (standaloneImage != null) {
+            flushParagraph()
+            flushBlockQuote()
+            blocks += MarkdownBlock.Image(
+                alt = standaloneImage.alt,
+                target = standaloneImage.target,
+            )
+            index += 1
             continue
         }
 
@@ -607,28 +988,50 @@ private fun parseMarkdownBlocks(markdown: String, hideQueryFences: Boolean): Lis
             continue
         }
 
-        taskMatch(trimmedLine)?.let { (checked, text) ->
+        taskMatch(rawLine)?.let { task ->
             flushParagraph()
-            blocks += MarkdownBlock.TaskItem(checked = checked, text = text)
+            blocks += MarkdownBlock.TaskItem(
+                checked = task.checked,
+                text = task.text,
+                indent = task.indent,
+            )
             index += 1
             continue
         }
 
-        bulletMatch(trimmedLine)?.let { text ->
+        bulletMatch(rawLine)?.let { bullet ->
             flushParagraph()
-            blocks += MarkdownBlock.BulletItem(text)
+            blocks += MarkdownBlock.BulletItem(
+                text = bullet.text,
+                indent = bullet.indent,
+            )
             index += 1
             continue
         }
 
-        numberedMatch(trimmedLine)?.let { (number, text) ->
+        numberedMatch(rawLine)?.let { numbered ->
             flushParagraph()
-            blocks += MarkdownBlock.NumberedItem(number = number, text = text)
+            blocks += MarkdownBlock.NumberedItem(
+                number = numbered.number,
+                text = numbered.text,
+                indent = numbered.indent,
+            )
             index += 1
             continue
         }
 
-        paragraph += trimmedLine
+        val indentedCode = markdownIndentedCodeBlockAt(lines, index)
+        if (indentedCode != null) {
+            flushParagraph()
+            blocks += MarkdownBlock.CodeFence(
+                text = indentedCode.text,
+                language = "",
+            )
+            index = indentedCode.endLineIndex + 1
+            continue
+        }
+
+        paragraph += rawLine.trimStart()
         index += 1
     }
 
@@ -653,25 +1056,30 @@ private fun headingMatch(line: String): Pair<Int, String>? {
     return hashes.length to text
 }
 
-private fun taskMatch(line: String): Pair<Boolean, String>? {
-    val match = Regex("""^[-*+]\s+\[([ xX])]\s+(.*)$""").matchEntire(line) ?: return null
-    return (match.groupValues[1].equals("x", ignoreCase = true)) to match.groupValues[2].trim()
+private fun taskMatch(line: String): MarkdownTaskMatch? {
+    val match = Regex("""^([ \t]*)[-*+]\s+\[([ xX])]\s+(.*)$""").matchEntire(line) ?: return null
+    return MarkdownTaskMatch(
+        checked = match.groupValues[2].equals("x", ignoreCase = true),
+        text = match.groupValues[3].trim(),
+        indent = match.groupValues[1],
+    )
 }
 
-private fun bulletMatch(line: String): String? {
-    return when {
-        line.startsWith("- ") -> line.removePrefix("- ").trim()
-        line.startsWith("* ") -> line.removePrefix("* ").trim()
-        line.startsWith("+ ") -> line.removePrefix("+ ").trim()
-        else -> null
-    }
+private fun bulletMatch(line: String): MarkdownBulletMatch? {
+    val match = Regex("""^([ \t]*)[-*+]\s+(.*)$""").matchEntire(line) ?: return null
+    return MarkdownBulletMatch(
+        text = match.groupValues[2].trim(),
+        indent = match.groupValues[1],
+    )
 }
 
-private fun numberedMatch(line: String): Pair<Int, String>? {
-    val dotIndex = line.indexOf(". ")
-    if (dotIndex <= 0) return null
-    val number = line.substring(0, dotIndex).toIntOrNull() ?: return null
-    return number to line.substring(dotIndex + 2).trim()
+private fun numberedMatch(line: String): MarkdownNumberedMatch? {
+    val match = Regex("""^([ \t]*)(\d+)\.\s+(.*)$""").matchEntire(line) ?: return null
+    return MarkdownNumberedMatch(
+        number = match.groupValues[2].toIntOrNull() ?: return null,
+        text = match.groupValues[3].trim(),
+        indent = match.groupValues[1],
+    )
 }
 
 private fun splitMarkdownTableRow(line: String): List<String> {
@@ -757,17 +1165,443 @@ private fun standaloneImageMatch(text: String): StandaloneImageMatch? {
     return null
 }
 
-internal fun parseInlineMarkdown(text: String, linkColor: Color): AnnotatedString {
-    return buildAnnotatedString {
-        appendInlineMarkdown(text, linkColor)
+private fun markdownIndentedCodeBlockAt(lines: List<String>, startLineIndex: Int): ParsedIndentedCodeBlock? {
+    if (startLineIndex !in lines.indices || !looksLikeIndentedCodeLine(lines[startLineIndex])) {
+        return null
+    }
+
+    val content = mutableListOf<String>()
+    var index = startLineIndex
+    var endLineIndex = startLineIndex
+    while (index < lines.size) {
+        val rawLine = lines[index].trimEnd('\r')
+        when {
+            rawLine.isBlank() -> {
+                content += ""
+                endLineIndex = index
+                index += 1
+            }
+            looksLikeIndentedCodeLine(rawLine) -> {
+                content += stripIndentedCodePrefix(rawLine)
+                endLineIndex = index
+                index += 1
+            }
+            else -> break
+        }
+    }
+
+    while (content.isNotEmpty() && content.last().isBlank()) {
+        content.removeLast()
+    }
+
+    return ParsedIndentedCodeBlock(
+        text = content.joinToString("\n"),
+        endLineIndex = endLineIndex,
+    )
+}
+
+private fun markdownDetailsBlockAt(lines: List<String>, startLineIndex: Int): ParsedDetailsBlock? {
+    if (startLineIndex !in lines.indices) return null
+    val opening = lines[startLineIndex].trim()
+    if (!Regex("""^<details(?:\s+open)?\s*>$""", RegexOption.IGNORE_CASE).matches(opening)) {
+        return null
+    }
+
+    var endLineIndex = -1
+    var index = startLineIndex + 1
+    while (index < lines.size) {
+        if (lines[index].trim().equals("</details>", ignoreCase = true)) {
+            endLineIndex = index
+            break
+        }
+        index += 1
+    }
+    if (endLineIndex == -1) return null
+
+    val innerLines = lines.subList(startLineIndex + 1, endLineIndex).toMutableList()
+    var summary = "Details"
+    if (innerLines.isNotEmpty()) {
+        val summaryMatch = Regex("""(?is)^\s*<summary>\s*(.*?)\s*</summary>\s*$""")
+            .matchEntire(innerLines.first().trim())
+        if (summaryMatch != null) {
+            summary = stripSimpleHtml(summaryMatch.groupValues[1]).ifBlank { "Details" }
+            innerLines.removeAt(0)
+        }
+    }
+
+    val body = innerLines
+        .dropWhile(String::isBlank)
+        .dropLastWhile(String::isBlank)
+        .joinToString("\n")
+
+    return ParsedDetailsBlock(
+        summary = summary,
+        body = body,
+        endLineIndex = endLineIndex,
+    )
+}
+
+private fun looksLikeIndentedCodeLine(line: String): Boolean {
+    return line.startsWith("\t") || line.startsWith("    ")
+}
+
+private fun stripIndentedCodePrefix(line: String): String {
+    return when {
+        line.startsWith("\t") -> line.removePrefix("\t")
+        line.startsWith("    ") -> line.drop(4)
+        else -> line
     }
 }
 
-private fun AnnotatedString.Builder.appendInlineMarkdown(text: String, linkColor: Color) {
+private fun parseFootnoteDefinitions(text: String): List<MarkdownFootnoteDefinition>? {
+    val lines = text
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .toList()
+    if (lines.isEmpty()) return null
+
+    val pattern = Regex("""^\[\^([^\]]+)]:\s+(.+)$""")
+    val items = lines.map { line ->
+        val match = pattern.matchEntire(line) ?: return null
+        MarkdownFootnoteDefinition(
+            label = match.groupValues[1].trim(),
+            text = match.groupValues[2].trim(),
+        )
+    }
+    return items
+}
+
+private fun parseMarkdownDefinitionList(text: String): List<MarkdownDefinitionListItem>? {
+    val lines = text
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .toList()
+    if (lines.size < 2) return null
+
+    val items = mutableListOf<MarkdownDefinitionListItem>()
+    var index = 0
+    while (index < lines.size) {
+        val term = lines[index]
+        if (term.startsWith(":")) return null
+        index += 1
+        val definitions = mutableListOf<String>()
+        while (index < lines.size && lines[index].startsWith(":")) {
+            definitions += lines[index].removePrefix(":").trim()
+            index += 1
+        }
+        if (definitions.isEmpty()) return null
+        items += MarkdownDefinitionListItem(term = term, definitions = definitions)
+    }
+
+    return items
+}
+
+private fun parseHtmlDefinitionList(text: String): List<MarkdownDefinitionListItem>? {
+    val body = Regex("""(?is)^\s*<dl>\s*(.*?)\s*</dl>\s*$""").matchEntire(text)?.groupValues?.get(1)
+        ?: return null
+    val entries = Regex("""(?is)<dt>\s*(.*?)\s*</dt>\s*<dd>\s*(.*?)\s*</dd>""")
+        .findAll(body)
+        .map { match ->
+            MarkdownDefinitionListItem(
+                term = stripSimpleHtml(match.groupValues[1]),
+                definitions = listOf(stripSimpleHtml(match.groupValues[2])),
+            )
+        }
+        .toList()
+    return entries.takeIf { it.isNotEmpty() }
+}
+
+private fun parseMarkdownAbbreviationDefinitions(text: String): List<MarkdownAbbreviationDefinition>? {
+    val lines = text
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .toList()
+    if (lines.isEmpty()) return null
+
+    val pattern = Regex("""^\*\[([^\]]+)]:\s+(.+)$""")
+    val items = lines.map { line ->
+        val match = pattern.matchEntire(line) ?: return null
+        MarkdownAbbreviationDefinition(
+            abbreviation = match.groupValues[1].trim(),
+            expansion = match.groupValues[2].trim(),
+        )
+    }
+    return items
+}
+
+private fun stripSimpleHtml(text: String): String {
+    return text.replace(Regex("""<[^>]+>"""), "").trim()
+}
+
+private fun parseMarkdownCallout(text: String): MarkdownCallout? {
+    val lines = text.replace("\r\n", "\n").split('\n')
+    if (lines.isEmpty()) return null
+    val match = Regex("""^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)]\s*(.*)$""", RegexOption.IGNORE_CASE)
+        .matchEntire(lines.first().trim())
+        ?: return null
+    val type = when (match.groupValues[1].uppercase()) {
+        "NOTE" -> MarkdownCalloutType.Note
+        "TIP" -> MarkdownCalloutType.Tip
+        "IMPORTANT" -> MarkdownCalloutType.Important
+        "WARNING" -> MarkdownCalloutType.Warning
+        "CAUTION" -> MarkdownCalloutType.Caution
+        else -> return null
+    }
+    val inlineBody = match.groupValues[2].trim()
+    val remaining = lines.drop(1).joinToString("\n").trim()
+    val body = listOf(inlineBody, remaining)
+        .filter(String::isNotBlank)
+        .joinToString("\n")
+        .ifBlank { type.label }
+    return MarkdownCallout(type = type, body = body)
+}
+
+private val markdownReferenceDefinitionLinePattern = Regex(
+    """^\s{0,3}\[([^\]]+)]:\s*(<[^>]+>|[^\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$""",
+)
+
+private fun normalizeMarkdownReferenceKey(key: String): String {
+    return key.trim().lowercase().replace(Regex("""\s+"""), " ")
+}
+
+private fun isMarkdownReferenceDefinitionParagraph(text: String): Boolean {
+    val lines = text
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .toList()
+    return lines.isNotEmpty() && lines.all(markdownReferenceDefinitionLinePattern::matches)
+}
+
+internal fun extractMarkdownReferenceDefinitions(markdown: String): Map<String, String> {
+    val definitions = linkedMapOf<String, String>()
+    val lines = markdown.replace("\r\n", "\n").split('\n')
+    var inCodeFence = false
+    var codeFenceMarker = "```"
+
+    lines.forEach { rawLine ->
+        val trimmedLine = rawLine.trim()
+        if (inCodeFence) {
+            if (Regex("^${Regex.escape(codeFenceMarker)}\\s*$").matches(trimmedLine)) {
+                inCodeFence = false
+            }
+            return@forEach
+        }
+
+        val codeFenceMatch = Regex("^(```+)(.*)$").matchEntire(trimmedLine)
+        if (codeFenceMatch != null) {
+            inCodeFence = true
+            codeFenceMarker = codeFenceMatch.groupValues[1]
+            return@forEach
+        }
+
+        val definitionMatch = markdownReferenceDefinitionLinePattern.matchEntire(rawLine) ?: return@forEach
+        val target = definitionMatch.groupValues[2]
+            .trim()
+            .removePrefix("<")
+            .removeSuffix(">")
+        if (target.isNotBlank()) {
+            definitions[normalizeMarkdownReferenceKey(definitionMatch.groupValues[1])] = target
+        }
+    }
+
+    return definitions
+}
+
+internal fun markdownListIndentLevel(indent: String): Int {
+    val width = indent.fold(0) { acc, char -> acc + if (char == '\t') 4 else 1 }
+    return (width / 2).coerceAtLeast(0)
+}
+
+private fun markdownListStartPadding(indent: String) = (markdownListIndentLevel(indent) * 18).dp
+
+internal fun parseInlineMarkdown(
+    text: String,
+    linkColor: Color,
+    linkDefinitions: Map<String, String> = emptyMap(),
+): AnnotatedString {
+    return buildAnnotatedString {
+        appendInlineMarkdown(text, linkColor, linkDefinitions)
+    }
+}
+
+private data class InlineCodeSpan(
+    val text: String,
+    val nextIndex: Int,
+)
+
+private val markdownEmojiShortcodes = mapOf(
+    "rocket" to "\uD83D\uDE80",
+    "tada" to "\uD83C\uDF89",
+    "white_check_mark" to "\u2705",
+    "warning" to "\u26A0\uFE0F",
+    "x" to "\u274C",
+)
+
+private fun isMarkdownEscapable(char: Char): Boolean {
+    return char in "\\`*_{}[]()#+-.!|:<>~"
+}
+
+private fun findUnescapedMarker(text: String, marker: String, startIndex: Int): Int {
+    var searchIndex = startIndex
+    while (searchIndex < text.length) {
+        val candidate = text.indexOf(marker, startIndex = searchIndex)
+        if (candidate == -1) {
+            return -1
+        }
+        if (candidate == 0 || text[candidate - 1] != '\\') {
+            return candidate
+        }
+        searchIndex = candidate + 1
+    }
+    return -1
+}
+
+private fun parseInlineCodeSpanAt(text: String, startIndex: Int): InlineCodeSpan? {
+    if (startIndex !in text.indices || text[startIndex] != '`') return null
+    val runLength = text.substring(startIndex).takeWhile { it == '`' }.length
+    if (runLength == 0) return null
+    val delimiter = "`".repeat(runLength)
+    val end = text.indexOf(delimiter, startIndex = startIndex + runLength)
+    if (end <= startIndex + runLength - 1) return null
+    val content = text
+        .substring(startIndex + runLength, end)
+        .replace('\n', ' ')
+    return InlineCodeSpan(
+        text = content,
+        nextIndex = end + runLength,
+    )
+}
+
+private fun parseEmojiShortcodeAt(text: String, startIndex: Int): Pair<String, Int>? {
+    if (startIndex !in text.indices || text[startIndex] != ':') return null
+    val end = text.indexOf(':', startIndex + 1)
+    if (end == -1) return null
+    val shortcode = text.substring(startIndex + 1, end)
+    if (!Regex("""[a-z0-9_+\-]+""", RegexOption.IGNORE_CASE).matches(shortcode)) {
+        return null
+    }
+    val emoji = markdownEmojiShortcodes[shortcode.lowercase()] ?: return null
+    return emoji to (end + 1)
+}
+
+private fun AnnotatedString.Builder.appendInlineMarkdown(
+    text: String,
+    linkColor: Color,
+    linkDefinitions: Map<String, String>,
+) {
     var index = 0
 
     while (index < text.length) {
         when {
+            text[index] == '\\' && index + 1 < text.length && isMarkdownEscapable(text[index + 1]) -> {
+                val escaped = text[index + 1]
+                append(escaped)
+                index += 2
+                if ((escaped == '*' || escaped == '_' || escaped == '~') &&
+                    index < text.length &&
+                    text[index] == escaped
+                ) {
+                    append(text[index])
+                    index += 1
+                }
+            }
+            parseInlineCodeSpanAt(text, index) != null -> {
+                val codeSpan = parseInlineCodeSpanAt(text, index)!!
+                pushStyle(
+                    SpanStyle(
+                        fontFamily = FontFamily.Monospace,
+                        background = Color(0x1A7A6F66),
+                    ),
+                )
+                append(codeSpan.text)
+                pop()
+                index = codeSpan.nextIndex
+            }
+            text.startsWith("***", index) || text.startsWith("___", index) -> {
+                val marker = text.substring(index, index + 3)
+                val end = findUnescapedMarker(text, marker, startIndex = index + 3)
+                if (end > index + 3) {
+                    pushStyle(
+                        SpanStyle(
+                            fontWeight = FontWeight.Bold,
+                            fontStyle = FontStyle.Italic,
+                        ),
+                    )
+                    appendInlineMarkdown(text.substring(index + 3, end), linkColor, linkDefinitions)
+                    pop()
+                    index = end + 3
+                } else {
+                    append(text[index])
+                    index += 1
+                }
+            }
+            text.regionMatches(index, "<sub>", 0, 5, ignoreCase = true) -> {
+                val end = text.indexOf("</sub>", startIndex = index + 5, ignoreCase = true)
+                if (end > index + 5) {
+                    pushStyle(
+                        SpanStyle(
+                            baselineShift = BaselineShift.Subscript,
+                            fontSize = 0.8.em,
+                        ),
+                    )
+                    appendInlineMarkdown(text.substring(index + 5, end), linkColor, linkDefinitions)
+                    pop()
+                    index = end + 6
+                } else {
+                    append(text[index])
+                    index += 1
+                }
+            }
+            text.regionMatches(index, "<sup>", 0, 5, ignoreCase = true) -> {
+                val end = text.indexOf("</sup>", startIndex = index + 5, ignoreCase = true)
+                if (end > index + 5) {
+                    pushStyle(
+                        SpanStyle(
+                            baselineShift = BaselineShift.Superscript,
+                            fontSize = 0.8.em,
+                        ),
+                    )
+                    appendInlineMarkdown(text.substring(index + 5, end), linkColor, linkDefinitions)
+                    pop()
+                    index = end + 6
+                } else {
+                    append(text[index])
+                    index += 1
+                }
+            }
+            text.regionMatches(index, "<kbd>", 0, 5, ignoreCase = true) -> {
+                val end = text.indexOf("</kbd>", startIndex = index + 5, ignoreCase = true)
+                if (end > index + 5) {
+                    pushStyle(
+                        SpanStyle(
+                            fontFamily = FontFamily.Monospace,
+                            background = Color(0x1A5F6368),
+                        ),
+                    )
+                    append(text.substring(index + 5, end))
+                    pop()
+                    index = end + 6
+                } else {
+                    append(text[index])
+                    index += 1
+                }
+            }
+            text.regionMatches(index, "<mark>", 0, 6, ignoreCase = true) -> {
+                val end = text.indexOf("</mark>", startIndex = index + 6, ignoreCase = true)
+                if (end > index + 6) {
+                    pushStyle(SpanStyle(background = Color(0x40FFD54F)))
+                    appendInlineMarkdown(text.substring(index + 6, end), linkColor, linkDefinitions)
+                    pop()
+                    index = end + 7
+                } else {
+                    append(text[index])
+                    index += 1
+                }
+            }
             text.startsWith("![[", index) -> {
                 val end = text.indexOf("]]", startIndex = index + 3)
                 if (end > index + 3) {
@@ -786,12 +1620,19 @@ private fun AnnotatedString.Builder.appendInlineMarkdown(text: String, linkColor
             text.startsWith("![", index) -> {
                 val close = text.indexOf("]", startIndex = index + 2)
                 val openParen = if (close != -1) text.indexOf("(", startIndex = close + 1) else -1
-                val closeParen = if (openParen != -1) text.indexOf(")", startIndex = openParen + 1) else -1
-                if (close > index + 1 && openParen == close + 1 && closeParen > openParen + 1) {
+                val inlineDestination = if (close > index + 1 && openParen == close + 1) {
+                    parseInlineLinkDestination(text, openParen)
+                } else {
+                    null
+                }
+                if (close > index + 1 && inlineDestination != null) {
                     val alt = text.substring(index + 2, close).trim()
-                    val target = text.substring(openParen + 1, closeParen).trim()
-                    appendLink("[Image: ${alt.ifBlank { pageTitleFromPath(target) }}]", target, linkColor)
-                    index = closeParen + 1
+                    appendLink(
+                        label = "[Image: ${alt.ifBlank { pageTitleFromPath(inlineDestination.target) }}]",
+                        target = inlineDestination.target,
+                        linkColor = linkColor,
+                    )
+                    index = inlineDestination.nextIndex
                 } else {
                     append(text[index])
                     index += 1
@@ -799,10 +1640,10 @@ private fun AnnotatedString.Builder.appendInlineMarkdown(text: String, linkColor
             }
             text.startsWith("**", index) || text.startsWith("__", index) -> {
                 val marker = text.substring(index, index + 2)
-                val end = text.indexOf(marker, startIndex = index + 2)
+                val end = findUnescapedMarker(text, marker, startIndex = index + 2)
                 if (end > index + 2) {
                     pushStyle(SpanStyle(fontWeight = FontWeight.Bold))
-                    appendInlineMarkdown(text.substring(index + 2, end), linkColor)
+                    appendInlineMarkdown(text.substring(index + 2, end), linkColor, linkDefinitions)
                     pop()
                     index = end + 2
                 } else {
@@ -811,10 +1652,10 @@ private fun AnnotatedString.Builder.appendInlineMarkdown(text: String, linkColor
                 }
             }
             text.startsWith("~~", index) -> {
-                val end = text.indexOf("~~", startIndex = index + 2)
+                val end = findUnescapedMarker(text, "~~", startIndex = index + 2)
                 if (end > index + 2) {
                     pushStyle(SpanStyle(textDecoration = TextDecoration.LineThrough))
-                    appendInlineMarkdown(text.substring(index + 2, end), linkColor)
+                    appendInlineMarkdown(text.substring(index + 2, end), linkColor, linkDefinitions)
                     pop()
                     index = end + 2
                 } else {
@@ -824,27 +1665,15 @@ private fun AnnotatedString.Builder.appendInlineMarkdown(text: String, linkColor
             }
             text.startsWith("*", index) || text.startsWith("_", index) -> {
                 val marker = text[index]
-                val end = text.indexOf(marker, startIndex = index + 1)
-                if (end > index + 1) {
-                    pushStyle(SpanStyle(fontStyle = FontStyle.Italic))
-                    appendInlineMarkdown(text.substring(index + 1, end), linkColor)
-                    pop()
-                    index = end + 1
-                } else {
+                if (text.getOrNull(index - 1) == marker || text.getOrNull(index + 1) == marker) {
                     append(text[index])
                     index += 1
+                    continue
                 }
-            }
-            text.startsWith("`", index) -> {
-                val end = text.indexOf("`", startIndex = index + 1)
+                val end = findUnescapedMarker(text, marker.toString(), startIndex = index + 1)
                 if (end > index + 1) {
-                    pushStyle(
-                        SpanStyle(
-                            fontFamily = FontFamily.Monospace,
-                            background = Color(0x1A7A6F66),
-                        ),
-                    )
-                    append(text.substring(index + 1, end))
+                    pushStyle(SpanStyle(fontStyle = FontStyle.Italic))
+                    appendInlineMarkdown(text.substring(index + 1, end), linkColor, linkDefinitions)
                     pop()
                     index = end + 1
                 } else {
@@ -867,19 +1696,97 @@ private fun AnnotatedString.Builder.appendInlineMarkdown(text: String, linkColor
                     index += 1
                 }
             }
+            text.startsWith("[^", index) -> {
+                val end = text.indexOf("]", startIndex = index + 2)
+                if (end > index + 2) {
+                    pushStyle(
+                        SpanStyle(
+                            baselineShift = BaselineShift.Superscript,
+                            fontSize = 0.75.em,
+                            color = linkColor,
+                        ),
+                    )
+                    append("[${text.substring(index + 2, end).trim()}]")
+                    pop()
+                    index = end + 1
+                } else {
+                    append(text[index])
+                    index += 1
+                }
+            }
+            parseEmojiShortcodeAt(text, index) != null -> {
+                val (emoji, nextIndex) = parseEmojiShortcodeAt(text, index)!!
+                append(emoji)
+                index = nextIndex
+            }
             text.startsWith("[", index) -> {
                 val close = text.indexOf("]", startIndex = index + 1)
                 val openParen = if (close != -1) text.indexOf("(", startIndex = close + 1) else -1
-                val closeParen = if (openParen != -1) text.indexOf(")", startIndex = openParen + 1) else -1
-                if (close > index + 1 && openParen == close + 1 && closeParen > openParen + 1) {
+                val inlineDestination = if (close > index + 1 && openParen == close + 1) {
+                    parseInlineLinkDestination(text, openParen)
+                } else {
+                    null
+                }
+                if (close > index + 1 && inlineDestination != null) {
                     val label = text.substring(index + 1, close)
-                    val target = text.substring(openParen + 1, closeParen).trim()
-                    pushStringAnnotation(tag = MarkdownLinkAnnotation, annotation = target)
-                    pushStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
-                    appendInlineMarkdown(label, linkColor)
-                    pop()
-                    pop()
-                    index = closeParen + 1
+                    appendMarkdownLink(
+                        label = label,
+                        target = inlineDestination.target,
+                        linkColor = linkColor,
+                        linkDefinitions = linkDefinitions,
+                    )
+                    index = inlineDestination.nextIndex
+                } else if (close > index + 1) {
+                    val label = text.substring(index + 1, close)
+                    val explicitReference = resolveExplicitReferenceLink(text, close, label, linkDefinitions)
+                    val shortcutReference = linkDefinitions[normalizeMarkdownReferenceKey(label)]
+                    when {
+                        explicitReference != null -> {
+                            appendMarkdownLink(
+                                label = label,
+                                target = explicitReference.target,
+                                linkColor = linkColor,
+                                linkDefinitions = linkDefinitions,
+                            )
+                            index = explicitReference.nextIndex
+                        }
+                        shortcutReference != null -> {
+                            appendMarkdownLink(
+                                label = label,
+                                target = shortcutReference,
+                                linkColor = linkColor,
+                                linkDefinitions = linkDefinitions,
+                            )
+                            index = close + 1
+                        }
+                        else -> {
+                            append(text[index])
+                            index += 1
+                        }
+                    }
+                } else {
+                    append(text[index])
+                    index += 1
+                }
+            }
+            text[index] == '<' -> {
+                val end = text.indexOf(">", startIndex = index + 1)
+                if (end > index + 1) {
+                    val body = text.substring(index + 1, end).trim()
+                    val target = when {
+                        body.startsWith("http://", ignoreCase = true) ||
+                            body.startsWith("https://", ignoreCase = true) ||
+                            body.startsWith("mailto:", ignoreCase = true) -> body
+                        looksLikeAutolinkEmail(body) -> "mailto:$body"
+                        else -> null
+                    }
+                    if (target != null) {
+                        appendLink(body, target, linkColor)
+                        index = end + 1
+                    } else {
+                        append(text[index])
+                        index += 1
+                    }
                 } else {
                     append(text[index])
                     index += 1
@@ -891,6 +1798,79 @@ private fun AnnotatedString.Builder.appendInlineMarkdown(text: String, linkColor
             }
         }
     }
+}
+
+private data class InlineLinkDestination(
+    val target: String,
+    val nextIndex: Int,
+)
+
+private data class ExplicitReferenceLink(
+    val target: String,
+    val nextIndex: Int,
+)
+
+private fun parseInlineLinkDestination(text: String, openParenIndex: Int): InlineLinkDestination? {
+    var index = openParenIndex + 1
+    var nestedParens = 0
+    while (index < text.length) {
+        when (text[index]) {
+            '(' -> nestedParens += 1
+            ')' -> {
+                if (nestedParens == 0) {
+                    val rawDestination = text.substring(openParenIndex + 1, index).trim()
+                    val target = when {
+                        rawDestination.startsWith("<") && rawDestination.contains(">") -> {
+                            rawDestination.substringAfter('<').substringBefore('>').trim()
+                        }
+                        ' ' in rawDestination -> rawDestination.substringBefore(' ').trim()
+                        else -> rawDestination
+                    }
+                    return target.takeIf(String::isNotBlank)?.let {
+                        InlineLinkDestination(target = it, nextIndex = index + 1)
+                    }
+                }
+                nestedParens -= 1
+            }
+        }
+        index += 1
+    }
+    return null
+}
+
+private fun resolveExplicitReferenceLink(
+    text: String,
+    closeBracketIndex: Int,
+    label: String,
+    linkDefinitions: Map<String, String>,
+): ExplicitReferenceLink? {
+    if (closeBracketIndex + 1 >= text.length || text[closeBracketIndex + 1] != '[') {
+        return null
+    }
+    val referenceClose = text.indexOf("]", startIndex = closeBracketIndex + 2)
+    if (referenceClose == -1) {
+        return null
+    }
+    val rawReference = text.substring(closeBracketIndex + 2, referenceClose)
+    val target = linkDefinitions[normalizeMarkdownReferenceKey(rawReference.ifBlank { label })] ?: return null
+    return ExplicitReferenceLink(target = target, nextIndex = referenceClose + 1)
+}
+
+private fun looksLikeAutolinkEmail(value: String): Boolean {
+    return Regex("""^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$""", RegexOption.IGNORE_CASE).matches(value)
+}
+
+private fun AnnotatedString.Builder.appendMarkdownLink(
+    label: String,
+    target: String,
+    linkColor: Color,
+    linkDefinitions: Map<String, String>,
+) {
+    pushStringAnnotation(tag = MarkdownLinkAnnotation, annotation = target)
+    pushStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
+    appendInlineMarkdown(label, linkColor, linkDefinitions)
+    pop()
+    pop()
 }
 
 private fun AnnotatedString.Builder.appendLink(label: String, target: String, linkColor: Color) {

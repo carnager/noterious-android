@@ -150,7 +150,7 @@ internal fun resolveRelativePath(currentPagePath: String, target: String): Strin
                 }
                 else -> resolvedSegments.addLast(trimmed)
             }
-    }
+        }
     return resolvedSegments.joinToString("/")
 }
 

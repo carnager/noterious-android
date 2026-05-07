@@ -35,14 +35,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -52,7 +54,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Alarm
-import androidx.compose.material.icons.filled.AlarmOff
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -76,7 +77,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -107,14 +107,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -140,6 +143,7 @@ import dev.carnager.noterious.model.TrashPageRecord
 import dev.carnager.noterious.model.UserSettingsPayload
 import dev.carnager.noterious.model.VaultRecord
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -202,6 +206,7 @@ private sealed interface NotePreviewItem {
     data class QueryResult(
         val blockIndex: Int,
         val startLine: Int,
+        val endLine: Int,
         val block: QueryBlock,
     ) : NotePreviewItem
 }
@@ -226,9 +231,40 @@ private data class TaskScheduleEditorState(
     val lineNumber: Int,
 )
 
+private data class InlineTaskEditorState(
+    val taskRef: String,
+    val blockIndex: Int,
+    val lineNumber: Int,
+    val value: TextFieldValue,
+)
+
+private data class InlineBlockEditorState(
+    val blockIndex: Int,
+    val lineNumber: Int,
+    val value: TextFieldValue,
+)
+
 private data class TextBlockEditorState(
     val blockIndex: Int,
     val lineNumber: Int,
+)
+
+private enum class InlineListBlockKind(val label: String) {
+    Bullet("Bullet"),
+    Numbered("Numbered"),
+}
+
+private data class EditableMarkdownLinkSpec(
+    val range: androidx.compose.ui.text.TextRange,
+    val label: String,
+    val target: String,
+)
+
+private data class InlineLinkEditorState(
+    val blockIndex: Int,
+    val range: androidx.compose.ui.text.TextRange?,
+    val label: String,
+    val target: String,
 )
 
 private enum class BlockInsertPlacement { Above, Below }
@@ -237,11 +273,18 @@ private data class BlockActionMenuState(
     val blockIndex: Int,
     val lineNumber: Int,
     val placement: BlockInsertPlacement = BlockInsertPlacement.Below,
+    val allowDelete: Boolean = true,
+    val showPlacementPicker: Boolean = true,
 )
 
 private data class PendingBlockInsertAnchor(
     val blockIndex: Int,
     val placement: BlockInsertPlacement,
+)
+
+private data class BlockQuickAction(
+    val label: String,
+    val onClick: () -> Unit,
 )
 
 private data class FrontmatterEntry(
@@ -558,7 +601,6 @@ fun NoteriousApp(viewModel: MainViewModel) {
             onPurgePageHistory = { onResult ->
                 viewModel.purgeOpenPageHistory(onResult)
             },
-            onShowGlobalMenu = { showSlashMenu = true },
             onPatchTask = { taskRef, text, state, due, remind, click, onResult ->
                 viewModel.patchOpenPageTask(
                     taskRef = taskRef,
@@ -676,12 +718,6 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     onClick = { selectedTab = Tab.Search },
                     icon = { Icon(Icons.Default.Search, contentDescription = null) },
                     label = { Text("Search") },
-                )
-                NavigationBarItem(
-                    selected = selectedTab == Tab.Settings,
-                    onClick = { selectedTab = Tab.Settings },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text("Settings") },
                 )
             }
         },
@@ -1202,7 +1238,9 @@ private fun QueryWorkbenchSheet(
                         block = previewBlock,
                         scopePrefix = scopePrefix,
                         onLinkClick = onOpenPage,
+                        onClick = null,
                         onEditQuery = null,
+                        onOpenActions = null,
                         onLongPress = null,
                     )
                     if (preview?.valid == true && preview.truncated) {
@@ -1479,7 +1517,6 @@ private fun PageViewerScreen(
     onLoadPageHistory: () -> Unit,
     onRestorePageHistory: (String, (Boolean) -> Unit) -> Unit,
     onPurgePageHistory: ((Boolean) -> Unit) -> Unit,
-    onShowGlobalMenu: () -> Unit,
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onPatchFrontmatter: (set: Map<String, kotlinx.serialization.json.JsonElement>, remove: List<String>, onResult: (Boolean) -> Unit) -> Unit,
     onUploadDocument: (Uri, (DocumentRecord?) -> Unit) -> Unit,
@@ -1490,7 +1527,7 @@ private fun PageViewerScreen(
     val coroutineScope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
     val snackbarHostState = remember { SnackbarHostState() }
-    val noteContentBottomPadding = 104.dp
+    val noteContentBottomPadding = 32.dp
     val taskReminderClickTarget = remember(pagePath) { noteriousPageDeepLink(pagePath) }
     val displayPath = remember(pagePath, settings.scopePrefix) {
         displayPagePath(pagePath, settings.scopePrefix).ifBlank { pagePath }
@@ -1514,6 +1551,9 @@ private fun PageViewerScreen(
     var isUploadingDocument by rememberSaveable(pagePath) { mutableStateOf(false) }
     var selectedBlockIndex by rememberSaveable(pagePath) { mutableStateOf(-1) }
     var guiBlocks by remember(pagePath) { mutableStateOf(parseNoteEditorBlocks(content.orEmpty())) }
+    var inlineTaskEditorState by remember(pagePath) { mutableStateOf<InlineTaskEditorState?>(null) }
+    var inlineBlockEditorState by remember(pagePath) { mutableStateOf<InlineBlockEditorState?>(null) }
+    var inlineLinkEditorState by remember(pagePath) { mutableStateOf<InlineLinkEditorState?>(null) }
     var tableEditorState by remember(pagePath) { mutableStateOf<TableEditorState?>(null) }
     var textBlockEditorState by remember(pagePath) { mutableStateOf<TextBlockEditorState?>(null) }
     var taskTextEditorState by remember(pagePath) { mutableStateOf<TaskTextEditorState?>(null) }
@@ -1547,8 +1587,11 @@ private fun PageViewerScreen(
             draftMarkdown = content
             rawEditorValue = TextFieldValue(content)
             guiBlocks = parseNoteEditorBlocks(content)
-            selectedBlockIndex = if (guiBlocks.isNotEmpty()) 0 else -1
+            selectedBlockIndex = -1
         }
+        inlineTaskEditorState = null
+        inlineBlockEditorState = null
+        inlineLinkEditorState = null
         tableEditorState = null
         textBlockEditorState = null
         taskTextEditorState = null
@@ -1579,7 +1622,7 @@ private fun PageViewerScreen(
         selectedBlockIndex = when {
             parsed.isEmpty() -> -1
             selectedBlockIndex in parsed.indices -> selectedBlockIndex
-            else -> 0
+            else -> -1
         }
     }
 
@@ -1599,6 +1642,172 @@ private fun PageViewerScreen(
         }
     }
 
+    fun closeInlineEditor() {
+        inlineTaskEditorState = null
+        inlineBlockEditorState = null
+        inlineLinkEditorState = null
+    }
+
+    fun selectPreviewBlock(blockIndex: Int) {
+        if (inlineBlockEditorState?.blockIndex != blockIndex || inlineTaskEditorState?.blockIndex != blockIndex) {
+            closeInlineEditor()
+        }
+        selectedBlockIndex = blockIndex
+    }
+
+    fun openInlineTaskEditor(task: ApiTaskItem, blockIndex: Int) {
+        val ref = task.ref.trim()
+        if (ref.isBlank()) return
+        selectedBlockIndex = blockIndex
+        taskScheduleEditorState = null
+        inlineBlockEditorState = null
+        inlineLinkEditorState = null
+        textBlockEditorState = null
+        tableEditorState = null
+        taskTextEditorState = null
+        val initialText = task.text.ifBlank { "Task" }
+        inlineTaskEditorState = InlineTaskEditorState(
+            taskRef = ref,
+            blockIndex = blockIndex,
+            lineNumber = task.line ?: 0,
+            value = TextFieldValue(
+                text = initialText,
+                selection = androidx.compose.ui.text.TextRange(initialText.length),
+            ),
+        )
+    }
+
+    fun updateInlineTaskEditorValue(value: TextFieldValue) {
+        val editorState = inlineTaskEditorState ?: return
+        inlineTaskEditorState = editorState.copy(value = value)
+    }
+
+    fun isInlineEditableBlock(block: NoteEditorBlock): Boolean {
+        return when (block) {
+            is NoteEditorBlock.Heading,
+            is NoteEditorBlock.Paragraph,
+            is NoteEditorBlock.BulletItem,
+            is NoteEditorBlock.NumberedItem,
+            is NoteEditorBlock.BlockQuote,
+            -> true
+
+            else -> false
+        }
+    }
+
+    fun applyInlineBlockTransform(
+        transform: (NoteEditorBlock, TextFieldValue) -> NoteEditorBlock,
+        updateState: ((InlineBlockEditorState) -> InlineBlockEditorState)? = null,
+    ) {
+        val editorState = inlineBlockEditorState ?: return
+        val currentBlock = guiBlocks.getOrNull(editorState.blockIndex) ?: return
+        val nextBlock = transform(currentBlock, editorState.value)
+        syncDraftFromBlocks(guiBlocks.updated(editorState.blockIndex, nextBlock))
+        selectedBlockIndex = editorState.blockIndex
+        inlineBlockEditorState = updateState?.invoke(editorState) ?: editorState
+    }
+
+    fun updateInlineEditorValue(value: TextFieldValue) {
+        applyInlineBlockTransform(
+            transform = { block, _ -> updatedTextEditorBlock(block, value.text, "") },
+            updateState = { state -> state.copy(value = value) },
+        )
+    }
+
+    fun updateInlineHeadingLevel(level: Int) {
+        applyInlineBlockTransform(transform = { block, value ->
+            val heading = block as? NoteEditorBlock.Heading ?: return@applyInlineBlockTransform block
+            heading.copy(level = level.coerceIn(1, 6), text = value.text)
+        })
+    }
+
+    fun updateInlineListIndent(delta: Int) {
+        applyInlineBlockTransform(transform = { block, value ->
+            when (block) {
+                is NoteEditorBlock.BulletItem -> {
+                    block.copy(
+                        text = value.text,
+                        indent = indentStringForLevel(markdownListIndentLevel(block.indent) + delta),
+                    )
+                }
+                is NoteEditorBlock.NumberedItem -> {
+                    block.copy(
+                        text = value.text,
+                        indent = indentStringForLevel(markdownListIndentLevel(block.indent) + delta),
+                    )
+                }
+                else -> block
+            }
+        })
+    }
+
+    fun convertInlineListBlock(kind: InlineListBlockKind) {
+        applyInlineBlockTransform(transform = { block, value ->
+            when (kind) {
+                InlineListBlockKind.Bullet -> when (block) {
+                    is NoteEditorBlock.BulletItem -> block.copy(text = value.text)
+                    is NoteEditorBlock.NumberedItem -> NoteEditorBlock.BulletItem(
+                        text = value.text,
+                        indent = block.indent,
+                    )
+                    else -> block
+                }
+                InlineListBlockKind.Numbered -> when (block) {
+                    is NoteEditorBlock.BulletItem -> NoteEditorBlock.NumberedItem(
+                        number = 1,
+                        text = value.text,
+                        indent = block.indent,
+                    )
+                    is NoteEditorBlock.NumberedItem -> block.copy(text = value.text)
+                    else -> block
+                }
+            }
+        })
+    }
+
+    fun openInlineLinkEditor(spec: EditableMarkdownLinkSpec?) {
+        val editorState = inlineBlockEditorState ?: return
+        val selection = editorState.value.selection
+        val selectedText = if (!selection.collapsed) {
+            editorState.value.text.substring(selection.start, selection.end)
+        } else {
+            ""
+        }
+        inlineLinkEditorState = InlineLinkEditorState(
+            blockIndex = editorState.blockIndex,
+            range = spec?.range,
+            label = spec?.label ?: selectedText,
+            target = spec?.target.orEmpty(),
+        )
+    }
+
+    fun applyInlineLinkEdit(state: InlineLinkEditorState, removeLink: Boolean = false) {
+        val editorState = inlineBlockEditorState ?: return
+        if (editorState.blockIndex != state.blockIndex) return
+        val rawLabel = state.label.trim()
+        val rawTarget = state.target.trim()
+        val replacement = when {
+            removeLink -> rawLabel
+            rawTarget.isBlank() -> rawLabel
+            else -> "[${rawLabel.ifBlank { rawTarget }}]($rawTarget)"
+        }
+        val range = state.range ?: editorState.value.selection
+        val start = range.start.coerceIn(0, editorState.value.text.length)
+        val end = range.end.coerceIn(start, editorState.value.text.length)
+        val nextText = buildString {
+            append(editorState.value.text.substring(0, start))
+            append(replacement)
+            append(editorState.value.text.substring(end))
+        }
+        updateInlineEditorValue(
+            editorState.value.copy(
+                text = nextText,
+                selection = androidx.compose.ui.text.TextRange(start + replacement.length),
+            ),
+        )
+        inlineLinkEditorState = null
+    }
+
     fun currentMarkdownDraft(): String {
         return when (editorMode) {
             NoteEditorMode.Preview -> draftMarkdown
@@ -1607,19 +1816,13 @@ private fun PageViewerScreen(
         }
     }
 
-    fun enterEditMode() {
-        draftMarkdown = currentMarkdownDraft()
-        syncGuiBlocksFromMarkdown(draftMarkdown)
-        imageActionTarget = null
-        blockActionMenuState = null
-        editorMode = NoteEditorMode.Edit
-    }
-
     fun enterPreviewMode() {
         draftMarkdown = currentMarkdownDraft()
         syncGuiBlocksFromMarkdown(draftMarkdown)
         imageActionTarget = null
         blockActionMenuState = null
+        inlineBlockEditorState = null
+        inlineLinkEditorState = null
         editorMode = NoteEditorMode.Preview
     }
 
@@ -1632,6 +1835,8 @@ private fun PageViewerScreen(
             text = draftMarkdown,
             selection = androidx.compose.ui.text.TextRange(offset),
         )
+        inlineBlockEditorState = null
+        inlineLinkEditorState = null
         blockActionMenuState = null
         editorMode = NoteEditorMode.Raw
     }
@@ -1651,10 +1856,20 @@ private fun PageViewerScreen(
         }
     }
 
+    fun persistCurrentDraft(onSuccess: (() -> Unit)? = null) {
+        if (currentMarkdownDraft() == baseMarkdown) {
+            onSuccess?.invoke()
+        } else {
+            saveDraft(onSuccess)
+        }
+    }
+
     fun cancelEditing() {
         draftMarkdown = baseMarkdown
         rawEditorValue = TextFieldValue(baseMarkdown)
         syncGuiBlocksFromMarkdown(baseMarkdown)
+        inlineBlockEditorState = null
+        inlineLinkEditorState = null
         blockActionMenuState = null
         isQueryInsertSheetVisible = false
         queryInsertDraft = ""
@@ -1671,6 +1886,7 @@ private fun PageViewerScreen(
         if (editorMode != NoteEditorMode.Preview || currentMarkdownDraft() != baseMarkdown) {
             return
         }
+        closeInlineEditor()
         imageActionTarget = null
         blockActionMenuState = null
         tableEditorState = null
@@ -1821,6 +2037,7 @@ private fun PageViewerScreen(
             return
         }
         syncGuiBlocksFromMarkdown(currentMarkdownDraft())
+        closeInlineEditor()
         blockActionMenuState = null
         textBlockEditorState = null
         selectedBlockIndex = blockIndex
@@ -1834,7 +2051,7 @@ private fun PageViewerScreen(
     }
 
     fun openTextBlockEditor(blockIndex: Int, lineNumber: Int) {
-        if (editorMode != NoteEditorMode.Edit) {
+        if (editorMode == NoteEditorMode.Raw) {
             return
         }
         syncGuiBlocksFromMarkdown(currentMarkdownDraft())
@@ -1843,10 +2060,25 @@ private fun PageViewerScreen(
         blockActionMenuState = null
         tableEditorState = null
         selectedBlockIndex = blockIndex
-        textBlockEditorState = TextBlockEditorState(
-            blockIndex = blockIndex,
-            lineNumber = lineNumber,
-        )
+        if (block is NoteEditorBlock.CodeFence) {
+            closeInlineEditor()
+            textBlockEditorState = TextBlockEditorState(
+                blockIndex = blockIndex,
+                lineNumber = lineNumber,
+            )
+        } else if (isInlineEditableBlock(block)) {
+            textBlockEditorState = null
+            val initialText = textEditorInitialText(block)
+            inlineBlockEditorState = InlineBlockEditorState(
+                blockIndex = blockIndex,
+                lineNumber = lineNumber,
+                value = TextFieldValue(
+                    text = initialText,
+                    selection = androidx.compose.ui.text.TextRange(initialText.length),
+                ),
+            )
+            inlineLinkEditorState = null
+        }
     }
 
     fun updateTextBlock(blockIndex: Int, updater: (NoteEditorBlock) -> NoteEditorBlock) {
@@ -1857,19 +2089,50 @@ private fun PageViewerScreen(
     }
 
     fun openBlockActions(blockIndex: Int, lineNumber: Int) {
-        if (editorMode != NoteEditorMode.Edit) {
+        if (editorMode == NoteEditorMode.Raw) {
             return
         }
         syncGuiBlocksFromMarkdown(currentMarkdownDraft())
+        closeInlineEditor()
         selectedBlockIndex = blockIndex
         tableEditorState = null
         textBlockEditorState = null
+        taskTextEditorState = null
+        taskScheduleEditorState = null
         isQueryInsertSheetVisible = false
         isGeneratingQuery = false
         pendingBlockInsertAnchor = null
         blockActionMenuState = BlockActionMenuState(
             blockIndex = blockIndex,
             lineNumber = lineNumber,
+        )
+    }
+
+    fun openInsertActions(blockIndex: Int, placement: BlockInsertPlacement, lineNumber: Int) {
+        if (editorMode == NoteEditorMode.Raw) {
+            return
+        }
+        syncGuiBlocksFromMarkdown(currentMarkdownDraft())
+        closeInlineEditor()
+        selectedBlockIndex = when {
+            guiBlocks.isEmpty() -> -1
+            blockIndex in guiBlocks.indices -> blockIndex
+            placement == BlockInsertPlacement.Above -> 0
+            else -> guiBlocks.lastIndex
+        }
+        tableEditorState = null
+        textBlockEditorState = null
+        taskTextEditorState = null
+        taskScheduleEditorState = null
+        isQueryInsertSheetVisible = false
+        isGeneratingQuery = false
+        pendingBlockInsertAnchor = null
+        blockActionMenuState = BlockActionMenuState(
+            blockIndex = blockIndex,
+            lineNumber = lineNumber,
+            placement = placement,
+            allowDelete = false,
+            showPlacementPicker = false,
         )
     }
 
@@ -1928,6 +2191,7 @@ private fun PageViewerScreen(
             )
             isQueryInsertSheetVisible = false
             queryInsertDraft = ""
+            persistCurrentDraft()
             coroutineScope.launch {
                 snackbarHostState.showSnackbar(
                     if (response.valid) {
@@ -1951,10 +2215,14 @@ private fun PageViewerScreen(
             anchor = pendingBlockInsertAnchor,
         )
         blockActionMenuState = null
+        persistCurrentDraft()
     }
 
     fun deleteBlockAtIndex(blockIndex: Int) {
         if (blockIndex !in guiBlocks.indices) return
+        if (inlineBlockEditorState?.blockIndex == blockIndex) {
+            closeInlineEditor()
+        }
         val nextBlocks = guiBlocks.toMutableList().apply {
             removeAt(blockIndex)
         }
@@ -1968,6 +2236,7 @@ private fun PageViewerScreen(
         textBlockEditorState = null
         blockActionMenuState = null
         pendingBlockInsertAnchor = null
+        persistCurrentDraft()
     }
 
     fun patchTask(
@@ -1984,11 +2253,20 @@ private fun PageViewerScreen(
         onPatchTask(taskRef, text, state, due, remind, click) { success ->
             pendingTaskRef = null
             if (success) {
+                inlineTaskEditorState = null
                 taskTextEditorState = null
                 taskScheduleEditorState = null
                 onSuccess?.invoke()
             }
         }
+    }
+
+    fun saveInlineTaskEditor() {
+        val editorState = inlineTaskEditorState ?: return
+        patchTask(
+            taskRef = editorState.taskRef,
+            text = editorState.value.text.trim(),
+        )
     }
 
     fun insertUploadedDocument(document: DocumentRecord) {
@@ -2014,6 +2292,7 @@ private fun PageViewerScreen(
                     NoteEditorBlock.Paragraph(markdownLink)
                 }
                 insertBlockAtAnchor(block, pendingBlockInsertAnchor)
+                persistCurrentDraft()
             }
         }
     }
@@ -2167,14 +2446,18 @@ private fun PageViewerScreen(
             isQueryInsertSheetVisible && !isGeneratingQuery -> dismissQueryInsertSheet()
             blockActionMenuState != null -> blockActionMenuState = null
             imageActionTarget != null -> imageActionTarget = null
+            inlineLinkEditorState != null -> inlineLinkEditorState = null
+            inlineTaskEditorState != null -> inlineTaskEditorState = null
+            inlineBlockEditorState != null -> inlineBlockEditorState = null
             textBlockEditorState != null -> textBlockEditorState = null
             taskTextEditorState != null -> taskTextEditorState = null
             taskScheduleEditorState != null -> taskScheduleEditorState = null
             tableEditorState != null -> tableEditorState = null
-            editorMode != NoteEditorMode.Preview -> enterPreviewMode()
+            selectedBlockIndex != -1 -> selectedBlockIndex = -1
+            editorMode == NoteEditorMode.Raw -> enterPreviewMode()
             hasUnsavedDraft -> {
                 coroutineScope.launch {
-                    snackbarHostState.showSnackbar("Use Done or Cancel before leaving this note.")
+                    snackbarHostState.showSnackbar("This note still has unsaved changes.")
                 }
             }
             else -> onBack()
@@ -2183,11 +2466,13 @@ private fun PageViewerScreen(
 
     val renderedMarkdown = currentMarkdownDraft()
     val isDirty = renderedMarkdown != baseMarkdown
-    val isEditMode = editorMode == NoteEditorMode.Edit
-    val backlinks = if (isDirty || editorMode != NoteEditorMode.Preview) emptyList() else derived?.backlinks.orEmpty()
-    val queryBlocks = if (isDirty || isEditMode) emptyList() else derived?.queryBlocks.orEmpty()
+    val backlinks = if (isDirty || editorMode == NoteEditorMode.Raw) emptyList() else derived?.backlinks.orEmpty()
+    val queryBlocks = if (isDirty || editorMode == NoteEditorMode.Raw) emptyList() else derived?.queryBlocks.orEmpty()
     val previewItems = remember(renderedMarkdown, queryBlocks) {
         buildNotePreviewItems(renderedMarkdown, queryBlocks)
+    }
+    val previewLinkDefinitions = remember(renderedMarkdown) {
+        extractMarkdownReferenceDefinitions(renderedMarkdown)
     }
     val activePageTasks = if (!isDirty) pageTasks else emptyList()
     val pageTaskByRef = remember(activePageTasks) {
@@ -2241,15 +2526,6 @@ private fun PageViewerScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = onShowGlobalMenu,
-                shape = CircleShape,
-                containerColor = MaterialTheme.colorScheme.primary,
-            ) {
-                Icon(Icons.Default.Menu, contentDescription = "Menu", tint = MaterialTheme.colorScheme.onPrimary)
-            }
-        },
         topBar = {
             TopAppBar(
                 title = {
@@ -2266,27 +2542,6 @@ private fun PageViewerScreen(
                 },
                 actions = {
                     when {
-                        editorMode == NoteEditorMode.Edit -> {
-                            TextButton(onClick = { cancelEditing() }) {
-                                Text("Cancel")
-                            }
-                            TextButton(
-                                onClick = {
-                                    if (isDirty) {
-                                        saveDraft { enterPreviewMode() }
-                                    } else {
-                                        enterPreviewMode()
-                                    }
-                                },
-                                enabled = !isSaving,
-                            ) {
-                                if (isSaving) {
-                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Text("Done")
-                                }
-                            }
-                        }
                         editorMode == NoteEditorMode.Raw -> {
                             TextButton(onClick = { cancelEditing() }) {
                                 Text("Cancel")
@@ -2310,54 +2565,27 @@ private fun PageViewerScreen(
                         }
                         isDirty -> {
                             TextButton(onClick = { cancelEditing() }) {
-                                Text("Cancel")
+                                Text("Revert")
                             }
                             TextButton(
                                 onClick = {
-                                    saveDraft { enterPreviewMode() }
+                                    saveDraft()
                                 },
                                 enabled = !isSaving,
                             ) {
                                 if (isSaving) {
                                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                                 } else {
-                                    Text("Done")
+                                    Text("Save")
                                 }
                             }
                         }
                         else -> {
                             IconButton(
-                                onClick = { openFrontmatterSheet() },
-                                enabled = !isSaving && content != null,
-                            ) {
-                                Icon(Icons.Default.Tune, contentDescription = "Frontmatter")
-                            }
-                            IconButton(
-                                onClick = {
-                                    isPageHistorySheetVisible = true
-                                    onLoadPageHistory()
-                                },
-                                enabled = !isSaving && content != null && !isPageHistoryBusy,
-                            ) {
-                                Icon(Icons.Default.History, contentDescription = "History")
-                            }
-                            TextButton(
                                 onClick = { isPageActionsSheetVisible = true },
-                                enabled = !isSaving && content != null,
-                            ) {
-                                Text("Note")
-                            }
-                            TextButton(
-                                onClick = { enterEditMode() },
-                                enabled = content != null || draftMarkdown.isNotBlank(),
-                            ) {
-                                Text("Edit")
-                            }
-                            TextButton(
-                                onClick = { openRawModeAtLine() },
                                 enabled = !isSaving,
                             ) {
-                                Text("Raw")
+                                Icon(Icons.Default.MoreVert, contentDescription = "Note actions")
                             }
                         }
                     }
@@ -2413,6 +2641,7 @@ private fun PageViewerScreen(
                     Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
+                        .imePadding()
                         .verticalScroll(rememberScrollState())
                         .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = noteContentBottomPadding),
                 ) {
@@ -2432,38 +2661,32 @@ private fun PageViewerScreen(
                     }
 
                     Spacer(Modifier.height(12.dp))
-                    if (isEditMode) {
-                        Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                text = "Edit mode: tap a text block to edit it. Long press a block for add, upload, or delete actions.",
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            )
-                        }
-                        Spacer(Modifier.height(12.dp))
-                    }
                     NotePreviewSurface(
                         items = previewItems,
-                        editInteractionsEnabled = isEditMode,
+                        selectedBlockIndex = selectedBlockIndex,
+                        inlineTaskEditorState = inlineTaskEditorState,
+                        inlineBlockEditorState = inlineBlockEditorState,
+                        editInteractionsEnabled = editorMode != NoteEditorMode.Raw,
                         taskByPreviewLine = pageTaskByPreviewLine,
-                        taskInteractionsEnabled = !isDirty,
+                        taskInteractionsEnabled = !isDirty && editorMode != NoteEditorMode.Raw,
                         pendingTaskRef = pendingTaskRef,
                         currentPagePath = pagePath,
                         settings = settings,
+                        linkDefinitions = previewLinkDefinitions,
                         scopePrefix = settings.scopePrefix,
-                        onSelectBlock = { selectedBlockIndex = it },
+                        onSelectBlock = ::selectPreviewBlock,
+                        onInsertBlock = if (editorMode != NoteEditorMode.Raw) ::openInsertActions else null,
                         onLinkClick = ::handleLink,
                         onImageClick = ::openImageActions,
-                        onEditTextBlock = if (isEditMode) ::openTextBlockEditor else null,
-                        onOpenBlockActions = if (isEditMode) ::openBlockActions else null,
-                        onEditQuery = if (isEditMode) {
+                        onEditTextBlock = if (editorMode != NoteEditorMode.Raw) ::openTextBlockEditor else null,
+                        onInlineValueChange = ::updateInlineEditorValue,
+                        onCloseInlineEditor = ::closeInlineEditor,
+                        onUpdateInlineHeadingLevel = ::updateInlineHeadingLevel,
+                        onUpdateInlineListIndent = ::updateInlineListIndent,
+                        onConvertInlineListBlock = ::convertInlineListBlock,
+                        onEditInlineLink = ::openInlineLinkEditor,
+                        onOpenBlockActions = if (editorMode != NoteEditorMode.Raw) ::openBlockActions else null,
+                        onEditQuery = if (editorMode != NoteEditorMode.Raw) {
                             { line -> openRawModeAtLine(line) }
                         } else {
                             null
@@ -2479,22 +2702,21 @@ private fun PageViewerScreen(
                                 )
                             }
                         },
-                        onEditTaskText = { task ->
-                            task.ref.takeIf(String::isNotBlank)?.let { ref ->
-                                taskTextEditorState = TaskTextEditorState(
-                                    taskRef = ref,
-                                    lineNumber = task.line ?: 0,
-                                )
-                            }
+                        onEditTaskText = { task, blockIndex ->
+                            openInlineTaskEditor(task, blockIndex)
                         },
                         onEditTaskSchedule = { task ->
                             task.ref.takeIf(String::isNotBlank)?.let { ref ->
+                                inlineTaskEditorState = null
+                                selectedBlockIndex = -1
                                 taskScheduleEditorState = TaskScheduleEditorState(
                                     taskRef = ref,
                                     lineNumber = task.line ?: 0,
                                 )
                             }
                         },
+                        onInlineTaskValueChange = ::updateInlineTaskEditorValue,
+                        onDoneTaskEditing = ::saveInlineTaskEditor,
                     )
 
                     if (isDirty && renderedMarkdown.contains("```query")) {
@@ -2525,7 +2747,10 @@ private fun PageViewerScreen(
             table = openTable,
             lineNumber = openTableLine,
             selection = editorState.cell,
-            onDismiss = { tableEditorState = null },
+            onDismiss = {
+                tableEditorState = null
+                persistCurrentDraft()
+            },
             onSelectCell = { selection ->
                 selectedBlockIndex = editorState.blockIndex
                 tableEditorState = editorState.copy(cell = selection)
@@ -2621,6 +2846,24 @@ private fun PageViewerScreen(
             onSave = { updatedBlock ->
                 updateTextBlock(editorState.blockIndex) { updatedBlock }
                 textBlockEditorState = null
+                persistCurrentDraft()
+            },
+        )
+    }
+
+    inlineLinkEditorState?.let { linkEditor ->
+        InlineLinkEditorSheet(
+            state = linkEditor,
+            onDismiss = { inlineLinkEditorState = null },
+            onSave = { updated ->
+                applyInlineLinkEdit(updated)
+            },
+            onRemove = if (linkEditor.range != null) {
+                {
+                    applyInlineLinkEdit(linkEditor, removeLink = true)
+                }
+            } else {
+                null
             },
         )
     }
@@ -2647,7 +2890,10 @@ private fun PageViewerScreen(
             task = openTaskSchedule,
             lineNumber = editorState.lineNumber.takeIf { it > 0 },
             isSaving = pendingTaskRef == openTaskSchedule.ref,
-            onDismiss = { taskScheduleEditorState = null },
+            onDismiss = {
+                taskScheduleEditorState = null
+                selectedBlockIndex = -1
+            },
             onSave = { dueValue, remindValue ->
                 val clickValue = when {
                     remindValue.isNotBlank() && openTaskSchedule.click.isNullOrBlank() -> taskReminderClickTarget
@@ -2701,12 +2947,66 @@ private fun PageViewerScreen(
     }
 
     blockActionMenuState?.let { target ->
+        val previewItem = previewItems.firstOrNull { item ->
+            when (item) {
+                is NotePreviewItem.MarkdownBlock -> item.blockIndex == target.blockIndex
+                is NotePreviewItem.QueryResult -> item.blockIndex == target.blockIndex
+            }
+        }
+        val currentBlock = guiBlocks.getOrNull(target.blockIndex)
+        val editLabel = if (target.allowDelete) {
+            when {
+                previewItem is NotePreviewItem.QueryResult -> "Edit query"
+                currentBlock is NoteEditorBlock.Table -> "Edit table"
+                currentBlock is NoteEditorBlock.Image -> "Image actions"
+                currentBlock != null && isEditableTextBlock(currentBlock) -> "Edit block"
+                else -> null
+            }
+        } else {
+            null
+        }
         BlockActionMenuSheet(
             lineNumber = target.lineNumber,
-            canDelete = target.blockIndex in guiBlocks.indices,
+            allowDelete = target.allowDelete && target.blockIndex in guiBlocks.indices,
+            showPlacementPicker = target.showPlacementPicker,
             placement = target.placement,
             isUploadingDocument = isUploadingDocument,
             onDismiss = { blockActionMenuState = null },
+            editLabel = editLabel,
+            onEditCurrent = if (target.allowDelete) {
+                when {
+                    previewItem is NotePreviewItem.QueryResult -> {
+                        {
+                            blockActionMenuState = null
+                            openRawModeAtLine(previewItem.block.line)
+                        }
+                    }
+                    currentBlock is NoteEditorBlock.Table -> {
+                        {
+                            blockActionMenuState = null
+                            openTableEditor(target.blockIndex, null, 0)
+                        }
+                    }
+                    currentBlock is NoteEditorBlock.Image -> {
+                        {
+                            blockActionMenuState = null
+                            imageActionTarget = MarkdownImageTarget(
+                                alt = currentBlock.alt,
+                                target = currentBlock.target,
+                            )
+                        }
+                    }
+                    currentBlock != null && isEditableTextBlock(currentBlock) -> {
+                        {
+                            blockActionMenuState = null
+                            openTextBlockEditor(target.blockIndex, target.lineNumber)
+                        }
+                    }
+                    else -> null
+                }
+            } else {
+                null
+            },
             onPlacementChange = { placement ->
                 blockActionMenuState = target.copy(placement = placement)
             },
@@ -2719,7 +3019,7 @@ private fun PageViewerScreen(
                 blockActionMenuState = null
                 uploadDocumentLauncher.launch("*/*")
             },
-            onDelete = if (target.blockIndex in guiBlocks.indices) {
+            onDelete = if (target.allowDelete && target.blockIndex in guiBlocks.indices) {
                 { deleteBlockAtIndex(target.blockIndex) }
             } else {
                 null
@@ -2738,6 +3038,14 @@ private fun PageViewerScreen(
                 if (!isPerformingPageAction && !isPageHistoryBusy) {
                     isPageActionsSheetVisible = false
                 }
+            },
+            onFrontmatter = {
+                isPageActionsSheetVisible = false
+                openFrontmatterSheet()
+            },
+            onRaw = {
+                isPageActionsSheetVisible = false
+                openRawModeAtLine()
             },
             onHistory = {
                 isPageActionsSheetVisible = false
@@ -2813,6 +3121,8 @@ private fun NoteActionsSheet(
     pagePath: String,
     isBusy: Boolean,
     onDismiss: () -> Unit,
+    onFrontmatter: (() -> Unit)? = null,
+    onRaw: (() -> Unit)? = null,
     onHistory: (() -> Unit)? = null,
     onRename: () -> Unit,
     onDelete: () -> Unit,
@@ -2838,6 +3148,24 @@ private fun NoteActionsSheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (onFrontmatter != null) {
+                Button(
+                    onClick = onFrontmatter,
+                    enabled = !isBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Edit frontmatter")
+                }
+            }
+            if (onRaw != null) {
+                Button(
+                    onClick = onRaw,
+                    enabled = !isBusy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Open raw markdown")
+                }
+            }
             if (onHistory != null) {
                 Button(
                     onClick = onHistory,
@@ -3362,6 +3690,9 @@ private fun buildNotePreviewItems(markdown: String, queryBlocks: List<QueryBlock
     return buildList {
         parsedBlocks.forEachIndexed { blockIndex, parsedBlock ->
             val block = parsedBlock.block
+            if (block is NoteEditorBlock.Paragraph && isReferenceDefinitionParagraph(block.text)) {
+                return@forEachIndexed
+            }
             val queryFence = block as? NoteEditorBlock.CodeFence
             if (queryFence?.language.equals("query", ignoreCase = true)) {
                 val querySource = normalizeMarkdownSource(
@@ -3378,6 +3709,7 @@ private fun buildNotePreviewItems(markdown: String, queryBlocks: List<QueryBlock
                         NotePreviewItem.QueryResult(
                             blockIndex = blockIndex,
                             startLine = parsedBlock.startLine,
+                            endLine = parsedBlock.endLine,
                             block = matchingQuery,
                         ),
                     )
@@ -3399,6 +3731,23 @@ private fun buildNotePreviewItems(markdown: String, queryBlocks: List<QueryBlock
 
 private fun normalizeMarkdownSource(source: String): String {
     return source.replace("\r\n", "\n").trim()
+}
+
+private val markdownReferenceDefinitionPattern = Regex(
+    """^\[[^\]]+]:\s+<?\S+>?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*$""",
+)
+
+private fun isReferenceDefinitionParagraph(text: String): Boolean {
+    val lines = text
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .toList()
+    return lines.isNotEmpty() && lines.all(markdownReferenceDefinitionPattern::matches)
+}
+
+private fun isThematicBreakParagraph(text: String): Boolean {
+    return Regex("""^([*_-])(?:\s*\1){2,}\s*$""").matches(text.trim())
 }
 
 private sealed interface QueryResultLinkSpec {
@@ -3537,30 +3886,43 @@ private fun queryResultDisplayCellText(
 @Composable
 private fun NotePreviewSurface(
     items: List<NotePreviewItem>,
+    selectedBlockIndex: Int,
+    inlineTaskEditorState: InlineTaskEditorState?,
+    inlineBlockEditorState: InlineBlockEditorState?,
     editInteractionsEnabled: Boolean,
     taskByPreviewLine: Map<Int, ApiTaskItem>,
     taskInteractionsEnabled: Boolean,
     pendingTaskRef: String?,
     currentPagePath: String,
     settings: dev.carnager.noterious.data.AppSettings,
+    linkDefinitions: Map<String, String>,
     scopePrefix: String,
     onSelectBlock: (Int) -> Unit,
+    onInsertBlock: ((Int, BlockInsertPlacement, Int) -> Unit)?,
     onLinkClick: (String) -> Unit,
     onImageClick: ((MarkdownImageTarget) -> Unit)?,
     onEditTextBlock: ((Int, Int) -> Unit)?,
+    onInlineValueChange: (TextFieldValue) -> Unit,
+    onCloseInlineEditor: () -> Unit,
+    onUpdateInlineHeadingLevel: (Int) -> Unit,
+    onUpdateInlineListIndent: (Int) -> Unit,
+    onConvertInlineListBlock: (InlineListBlockKind) -> Unit,
+    onEditInlineLink: (EditableMarkdownLinkSpec?) -> Unit,
     onOpenBlockActions: ((Int, Int) -> Unit)?,
     onEditQuery: ((Int) -> Unit)?,
     onEditTableCell: ((Int, Int?, Int) -> Unit)?,
     onToggleTask: (ApiTaskItem) -> Unit,
-    onEditTaskText: (ApiTaskItem) -> Unit,
+    onEditTaskText: (ApiTaskItem, Int) -> Unit,
     onEditTaskSchedule: (ApiTaskItem) -> Unit,
+    onInlineTaskValueChange: (TextFieldValue) -> Unit,
+    onDoneTaskEditing: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (items.isEmpty()) {
-            if (editInteractionsEnabled && onOpenBlockActions != null) {
+            if (editInteractionsEnabled && onInsertBlock != null) {
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
@@ -3568,7 +3930,7 @@ private fun NotePreviewSurface(
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onOpenBlockActions(-1, 1) },
+                        .clickable { onInsertBlock(-1, BlockInsertPlacement.Below, 1) },
                 ) {
                     Text(
                         text = "Add the first block.",
@@ -3592,70 +3954,131 @@ private fun NotePreviewSurface(
                 is NotePreviewItem.MarkdownBlock -> item.blockIndex
                 is NotePreviewItem.QueryResult -> item.blockIndex
             }
-            val lineNumber = when (item) {
+            val startLine = when (item) {
                 is NotePreviewItem.MarkdownBlock -> item.startLine
                 is NotePreviewItem.QueryResult -> item.startLine
+            }
+            val endLine = when (item) {
+                is NotePreviewItem.MarkdownBlock -> item.endLine
+                is NotePreviewItem.QueryResult -> item.endLine
+            }
+            val selected = blockIndex == selectedBlockIndex
+            val inlineEditor = inlineBlockEditorState?.takeIf { it.blockIndex == blockIndex }
+            val openActions = if (editInteractionsEnabled && onOpenBlockActions != null) {
+                {
+                    onSelectBlock(blockIndex)
+                    onOpenBlockActions(blockIndex, startLine)
+                }
+            } else {
+                null
+            }
+            val addBelow = if (editInteractionsEnabled && onInsertBlock != null) {
+                {
+                    onSelectBlock(blockIndex)
+                    onInsertBlock(blockIndex, BlockInsertPlacement.Below, endLine + 1)
+                }
+            } else {
+                null
             }
 
             when (item) {
                 is NotePreviewItem.MarkdownBlock -> {
                     when (val block = item.block) {
                         is NoteEditorBlock.Table -> {
-                            InteractiveTablePreview(
-                                table = block,
-                                onCellClick = if (onEditTableCell != null) {
-                                    { cell ->
-                                        onSelectBlock(item.blockIndex)
-                                        onEditTableCell(item.blockIndex, cell.rowIndex, cell.columnIndex)
-                                    }
-                                } else {
-                                    null
-                                },
-                                onCellLongPress = if (editInteractionsEnabled && onOpenBlockActions != null) {
-                                    {
-                                        onSelectBlock(item.blockIndex)
-                                        onOpenBlockActions(item.blockIndex, lineNumber)
-                                    }
-                                } else {
-                                    null
-                                },
-                            )
+                            val actions = buildList {
+                                if (onEditTableCell != null) {
+                                    add(
+                                        BlockQuickAction("Edit table") {
+                                            onSelectBlock(item.blockIndex)
+                                            onEditTableCell(item.blockIndex, null, 0)
+                                        },
+                                    )
+                                }
+                                addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                openActions?.let { add(BlockQuickAction("More", it)) }
+                            }
+                            PreviewBlockFrame(
+                                selected = selected,
+                                label = previewBlockLabel(block),
+                                actions = actions,
+                            ) {
+                                InteractiveTablePreview(
+                                    table = block,
+                                    onCellClick = if (onEditTableCell != null) {
+                                        { cell ->
+                                            onSelectBlock(item.blockIndex)
+                                            if (selected) {
+                                                onEditTableCell(item.blockIndex, cell.rowIndex, cell.columnIndex)
+                                            }
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    onCellLongPress = openActions,
+                                )
+                            }
                         }
                         is NoteEditorBlock.TaskItem -> {
                             val task = taskByPreviewLine[item.startLine]
-                            TaskPreviewRow(
-                                text = task?.text?.ifBlank { stripTaskInlineFields(block.text) }
-                                    ?: stripTaskInlineFields(block.text),
-                                checked = task?.done ?: block.checked,
-                                due = task?.due,
-                                remind = task?.remind,
-                                interactive = taskInteractionsEnabled && task?.ref?.isNotBlank() == true,
-                                isBusy = pendingTaskRef != null && task?.ref == pendingTaskRef,
-                                onToggle = if (taskInteractionsEnabled && task?.ref?.isNotBlank() == true) {
-                                    { onToggleTask(task) }
-                                } else {
-                                    null
-                                },
-                                onEditText = if (taskInteractionsEnabled && task?.ref?.isNotBlank() == true) {
-                                    { onEditTaskText(task) }
-                                } else {
-                                    null
-                                },
-                                onEditSchedule = if (taskInteractionsEnabled && task?.ref?.isNotBlank() == true) {
-                                    { onEditTaskSchedule(task) }
-                                } else {
-                                    null
-                                },
-                                onLongPress = if (editInteractionsEnabled && onOpenBlockActions != null) {
-                                    {
-                                        onSelectBlock(item.blockIndex)
-                                        onOpenBlockActions(item.blockIndex, lineNumber)
-                                    }
-                                } else {
-                                    null
-                                },
-                                onLinkClick = if (taskInteractionsEnabled || editInteractionsEnabled) null else onLinkClick,
-                            )
+                            val interactiveTask = taskInteractionsEnabled && task?.ref?.isNotBlank() == true
+                            val inlineTaskEditor = task?.ref
+                                ?.takeIf(String::isNotBlank)
+                                ?.let { ref -> inlineTaskEditorState?.takeIf { it.taskRef == ref } }
+                            val actions = if (inlineTaskEditor != null) {
+                                emptyList()
+                            } else {
+                                buildList {
+                                    addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                    openActions?.let { add(BlockQuickAction("More", it)) }
+                                }
+                            }
+                            PreviewBlockFrame(
+                                selected = selected,
+                                label = previewBlockLabel(block),
+                                actions = actions,
+                            ) {
+                                TaskPreviewRow(
+                                    text = task?.text?.ifBlank { stripTaskInlineFields(block.text) }
+                                        ?: stripTaskInlineFields(block.text),
+                                    checked = task?.done ?: block.checked,
+                                    due = task?.due,
+                                    remind = task?.remind,
+                                    interactive = interactiveTask,
+                                    indentLevel = markdownListIndentLevel(block.indent),
+                                    linkDefinitions = linkDefinitions,
+                                    selected = selected,
+                                    inlineEditorState = inlineTaskEditor,
+                                    isBusy = pendingTaskRef != null && task?.ref == pendingTaskRef,
+                                    onSelect = { onSelectBlock(item.blockIndex) },
+                                    onToggle = if (interactiveTask) {
+                                        { onToggleTask(task) }
+                                    } else {
+                                        null
+                                    },
+                                    onEditText = if (interactiveTask) {
+                                        { onEditTaskText(task, item.blockIndex) }
+                                    } else {
+                                        null
+                                    },
+                                    onEditSchedule = if (interactiveTask) {
+                                        { onEditTaskSchedule(task) }
+                                    } else {
+                                        null
+                                    },
+                                    onInlineValueChange = if (interactiveTask) {
+                                        onInlineTaskValueChange
+                                    } else {
+                                        null
+                                    },
+                                    onDoneEditing = if (interactiveTask) {
+                                        onDoneTaskEditing
+                                    } else {
+                                        null
+                                    },
+                                    onLongPress = openActions,
+                                    onLinkClick = if (taskInteractionsEnabled) null else onLinkClick,
+                                )
+                            }
                         }
                         is NoteEditorBlock.Heading,
                         is NoteEditorBlock.Paragraph,
@@ -3664,90 +4087,729 @@ private fun NotePreviewSurface(
                         is NoteEditorBlock.BlockQuote,
                         is NoteEditorBlock.CodeFence,
                         -> {
-                            val blockModifier = if (editInteractionsEnabled) {
-                                Modifier
-                                    .fillMaxWidth()
-                                    .combinedClickable(
-                                        onClick = {
-                                            onSelectBlock(blockIndex)
-                                            onEditTextBlock?.invoke(blockIndex, lineNumber)
-                                        },
-                                        onLongClick = if (onOpenBlockActions != null) {
-                                            {
-                                                onSelectBlock(blockIndex)
-                                                onOpenBlockActions(blockIndex, lineNumber)
-                                            }
-                                        } else {
-                                            null
-                                        },
-                                    )
-                            } else {
-                                Modifier.fillMaxWidth()
-                            }
-                            MarkdownContent(
-                                markdown = blockToMarkdown(block),
-                                currentPagePath = currentPagePath,
-                                settings = settings,
-                                modifier = blockModifier,
-                                onLinkClick = if (editInteractionsEnabled) null else onLinkClick,
-                                onImageClick = if (editInteractionsEnabled) null else onImageClick,
+                            val inlineEditing = inlineEditor != null && block !is NoteEditorBlock.CodeFence
+                            val directInlineEdit = !inlineEditing && shouldOpenInlineEditorDirectly(
+                                block = block,
+                                linkDefinitions = linkDefinitions,
                             )
+                            val editText = if (editInteractionsEnabled && onEditTextBlock != null) {
+                                {
+                                    onSelectBlock(item.blockIndex)
+                                    onEditTextBlock(item.blockIndex, item.startLine)
+                                }
+                            } else {
+                                null
+                            }
+                            val actions = if (inlineEditing) {
+                                emptyList()
+                            } else {
+                                buildList {
+                                    if (!directInlineEdit) {
+                                    editText?.let { add(BlockQuickAction("Edit", it)) }
+                                    }
+                                    addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                    openActions?.let { add(BlockQuickAction("More", it)) }
+                                }
+                            }
+                            PreviewBlockFrame(
+                                selected = selected,
+                                label = previewBlockLabel(block),
+                                actions = actions,
+                            ) {
+                                BlockGestureSurface(
+                                    onClick = {
+                                        when {
+                                            directInlineEdit -> editText?.invoke()
+                                            else -> {
+                                                onSelectBlock(item.blockIndex)
+                                                if (selected) {
+                                                    editText?.invoke()
+                                                }
+                                            }
+                                        }
+                                    },
+                                    onLongPress = openActions,
+                                ) {
+                                    when {
+                                        inlineEditing && block is NoteEditorBlock.BulletItem -> {
+                                            InlineListBlockEditor(
+                                                block = block,
+                                                editorState = inlineEditor,
+                                                linkDefinitions = linkDefinitions,
+                                                onValueChange = onInlineValueChange,
+                                                onUpdateIndent = onUpdateInlineListIndent,
+                                                onConvertType = onConvertInlineListBlock,
+                                                onEditLink = onEditInlineLink,
+                                                onDone = onCloseInlineEditor,
+                                            )
+                                        }
+                                        inlineEditing && block is NoteEditorBlock.NumberedItem -> {
+                                            InlineListBlockEditor(
+                                                block = block,
+                                                editorState = inlineEditor,
+                                                linkDefinitions = linkDefinitions,
+                                                onValueChange = onInlineValueChange,
+                                                onUpdateIndent = onUpdateInlineListIndent,
+                                                onConvertType = onConvertInlineListBlock,
+                                                onEditLink = onEditInlineLink,
+                                                onDone = onCloseInlineEditor,
+                                            )
+                                        }
+                                        inlineEditing -> {
+                                            InlineTextBlockEditor(
+                                                block = block,
+                                                editorState = inlineEditor,
+                                                linkDefinitions = linkDefinitions,
+                                                onValueChange = onInlineValueChange,
+                                                onUpdateHeadingLevel = onUpdateInlineHeadingLevel,
+                                                onEditLink = onEditInlineLink,
+                                                onDone = onCloseInlineEditor,
+                                            )
+                                        }
+                                        block is NoteEditorBlock.Paragraph && isThematicBreakParagraph(block.text) -> {
+                                            ThematicBreakPreview()
+                                        }
+                                        block is NoteEditorBlock.CodeFence -> {
+                                            CodeBlockPreviewCard(block)
+                                        }
+                                        else -> {
+                                            MarkdownContent(
+                                                markdown = blockToMarkdown(block),
+                                                currentPagePath = currentPagePath,
+                                                settings = settings,
+                                                modifier = Modifier.fillMaxWidth(),
+                                                linkDefinitions = linkDefinitions,
+                                                onLinkClick = onLinkClick,
+                                                onImageClick = onImageClick,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                         is NoteEditorBlock.Image -> {
-                            val imageTarget = remember(block.alt, block.target) {
-                                MarkdownImageTarget(
-                                    alt = block.alt,
-                                    target = block.target,
-                                )
-                            }
-                            val blockModifier = if (editInteractionsEnabled) {
-                                Modifier
-                                    .fillMaxWidth()
-                                    .combinedClickable(
-                                        onClick = { onImageClick?.invoke(imageTarget) },
-                                        onLongClick = if (onOpenBlockActions != null) {
-                                            {
-                                                onSelectBlock(blockIndex)
-                                                onOpenBlockActions(blockIndex, lineNumber)
-                                            }
-                                        } else {
-                                            null
+                            val imageTarget = MarkdownImageTarget(
+                                alt = block.alt,
+                                target = block.target,
+                            )
+                            val actions = buildList {
+                                onImageClick?.let { editImage ->
+                                    add(
+                                        BlockQuickAction("Image") {
+                                            onSelectBlock(item.blockIndex)
+                                            editImage(imageTarget)
                                         },
                                     )
-                            } else {
-                                Modifier.fillMaxWidth()
+                                }
+                                addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                openActions?.let { add(BlockQuickAction("More", it)) }
                             }
-                            MarkdownContent(
-                                markdown = blockToMarkdown(block),
-                                currentPagePath = currentPagePath,
-                                settings = settings,
-                                modifier = blockModifier,
-                                onLinkClick = if (editInteractionsEnabled) null else onLinkClick,
-                                onImageClick = if (editInteractionsEnabled) null else onImageClick,
-                            )
+                            PreviewBlockFrame(
+                                selected = selected,
+                                label = previewBlockLabel(block),
+                                actions = actions,
+                            ) {
+                                BlockGestureSurface(
+                                    onClick = { onSelectBlock(item.blockIndex) },
+                                    onLongPress = openActions,
+                                ) {
+                                    MarkdownContent(
+                                        markdown = blockToMarkdown(block),
+                                        currentPagePath = currentPagePath,
+                                        settings = settings,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        linkDefinitions = linkDefinitions,
+                                        onLinkClick = onLinkClick,
+                                        onImageClick = { target ->
+                                            onSelectBlock(item.blockIndex)
+                                            if (selected) {
+                                                onImageClick?.invoke(target)
+                                            }
+                                        },
+                                    )
+                                }
+                            }
                         }
                     }
                 }
-                is NotePreviewItem.QueryResult -> QueryBlockCard(
-                    block = item.block,
-                    scopePrefix = scopePrefix,
-                    onLinkClick = onLinkClick,
-                    onEditQuery = if (editInteractionsEnabled && onEditQuery != null) {
-                        { onEditQuery(item.block.line) }
-                    } else {
-                        null
-                    },
-                    onLongPress = if (editInteractionsEnabled && onOpenBlockActions != null) {
+                is NotePreviewItem.QueryResult -> {
+                    val editQuery = if (editInteractionsEnabled && onEditQuery != null) {
                         {
                             onSelectBlock(item.blockIndex)
-                            onOpenBlockActions(item.blockIndex, lineNumber)
+                            onEditQuery(item.block.line)
                         }
                     } else {
                         null
+                    }
+                    val actions = buildList {
+                        editQuery?.let { add(BlockQuickAction("Edit query", it)) }
+                        addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                        openActions?.let { add(BlockQuickAction("More", it)) }
+                    }
+                    PreviewBlockFrame(
+                        selected = selected,
+                        label = "Query",
+                        actions = actions,
+                    ) {
+                        QueryBlockCard(
+                            block = item.block,
+                            scopePrefix = scopePrefix,
+                            onLinkClick = onLinkClick,
+                            onClick = {
+                                onSelectBlock(item.blockIndex)
+                                if (selected) {
+                                    editQuery?.invoke()
+                                }
+                            },
+                            onEditQuery = null,
+                            onOpenActions = null,
+                            onLongPress = openActions,
+                        )
+                    }
+                }
+            }
+        }
+
+        if (editInteractionsEnabled && onInsertBlock != null) {
+            AddBlockHandle(
+                onClick = {
+                    val lastBlockIndex = when (val lastItem = items.last()) {
+                        is NotePreviewItem.MarkdownBlock -> lastItem.blockIndex
+                        is NotePreviewItem.QueryResult -> lastItem.blockIndex
+                    }
+                    onInsertBlock(lastBlockIndex, BlockInsertPlacement.Below, 0)
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun AddBlockHandle(
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        AssistChip(
+            onClick = onClick,
+            label = { Text("Add block") },
+            leadingIcon = {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            },
+        )
+    }
+}
+
+private fun previewBlockLabel(block: NoteEditorBlock): String {
+    return when (block) {
+        is NoteEditorBlock.Heading -> "Heading ${block.level}"
+        is NoteEditorBlock.Paragraph -> if (isThematicBreakParagraph(block.text)) "Divider" else "Paragraph"
+        is NoteEditorBlock.BulletItem -> "Bullet"
+        is NoteEditorBlock.NumberedItem -> "Numbered"
+        is NoteEditorBlock.TaskItem -> "Task"
+        is NoteEditorBlock.BlockQuote -> "Quote"
+        is NoteEditorBlock.CodeFence -> if (block.language.isBlank()) "Code" else "Code · ${block.language}"
+        is NoteEditorBlock.Table -> "Table"
+        is NoteEditorBlock.Image -> "Image"
+    }
+}
+
+private fun inlineEditableBlockText(block: NoteEditorBlock): String? {
+    return when (block) {
+        is NoteEditorBlock.Heading -> block.text
+        is NoteEditorBlock.Paragraph -> block.text
+        is NoteEditorBlock.BulletItem -> block.text
+        is NoteEditorBlock.NumberedItem -> block.text
+        is NoteEditorBlock.BlockQuote -> block.text
+        else -> null
+    }
+}
+
+private fun blockEditableLinks(
+    block: NoteEditorBlock,
+    linkDefinitions: Map<String, String>,
+): List<EditableMarkdownLinkSpec> {
+    val text = inlineEditableBlockText(block) ?: return emptyList()
+    return editableMarkdownLinksForText(text, linkDefinitions)
+}
+
+private fun shouldOpenInlineEditorDirectly(
+    block: NoteEditorBlock,
+    linkDefinitions: Map<String, String>,
+): Boolean {
+    return when (block) {
+        is NoteEditorBlock.Heading,
+        is NoteEditorBlock.BulletItem,
+        is NoteEditorBlock.NumberedItem,
+        is NoteEditorBlock.BlockQuote,
+        -> blockEditableLinks(block, linkDefinitions).isEmpty()
+
+        is NoteEditorBlock.Paragraph -> {
+            !isThematicBreakParagraph(block.text) && blockEditableLinks(block, linkDefinitions).isEmpty()
+        }
+
+        else -> false
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PreviewBlockFrame(
+    selected: Boolean,
+    label: String,
+    actions: List<BlockQuickAction>,
+    content: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (selected) {
+                    Modifier
+                        .background(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
+                            shape = RoundedCornerShape(18.dp),
+                        )
+                        .padding(12.dp)
+                } else {
+                    Modifier
+                },
+            ),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        content()
+        AnimatedVisibility(
+            visible = selected && actions.isNotEmpty(),
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    actions.forEach { action ->
+                        AssistChip(
+                            onClick = action.onClick,
+                            label = { Text(action.label) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThematicBreakPreview() {
+    HorizontalDivider(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f),
+        thickness = 1.dp,
+    )
+}
+
+@Composable
+private fun CodeBlockPreviewCard(block: NoteEditorBlock.CodeFence) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+        ),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (block.language.isNotBlank()) {
+                Text(
+                    text = block.language,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Text(
+                text = block.text.ifBlank { "Empty code block" },
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState())
+                    .horizontalScroll(rememberScrollState()),
+                softWrap = false,
+            )
+        }
+    }
+}
+
+@Composable
+private fun inlineEditorTextStyle(block: NoteEditorBlock): TextStyle {
+    return when (block) {
+        is NoteEditorBlock.Heading -> when (block.level.coerceIn(1, 6)) {
+            1 -> MaterialTheme.typography.headlineLarge
+            2 -> MaterialTheme.typography.headlineMedium
+            3 -> MaterialTheme.typography.titleLarge
+            4 -> MaterialTheme.typography.titleMedium
+            5 -> MaterialTheme.typography.titleSmall
+            else -> MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
+        }
+
+        is NoteEditorBlock.BlockQuote -> {
+            MaterialTheme.typography.bodyLarge.copy(fontStyle = FontStyle.Italic)
+        }
+
+        else -> MaterialTheme.typography.bodyLarge
+    }.copy(color = MaterialTheme.colorScheme.onSurface)
+}
+
+private fun inlineEditorPlaceholder(block: NoteEditorBlock): String {
+    return when (block) {
+        is NoteEditorBlock.Heading -> "Heading"
+        is NoteEditorBlock.BulletItem,
+        is NoteEditorBlock.NumberedItem,
+        -> "List item"
+
+        is NoteEditorBlock.BlockQuote -> "Quote"
+        else -> "Start writing"
+    }
+}
+
+@Composable
+private fun InlineEditorTextField(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    focusRequester: FocusRequester,
+    textStyle: TextStyle,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+    singleLine: Boolean = false,
+    minLines: Int = 1,
+    maxLines: Int = Int.MAX_VALUE,
+    showContainer: Boolean = true,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions(),
+) {
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester),
+        textStyle = textStyle,
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        singleLine = singleLine,
+        minLines = minLines,
+        maxLines = maxLines,
+        keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
+        decorationBox = { innerTextField ->
+            val decorationModifier = if (showContainer) {
+                Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.32f),
+                        shape = RoundedCornerShape(16.dp),
+                    )
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            }
+            Box(
+                modifier = decorationModifier,
+            ) {
+                if (value.text.isEmpty()) {
+                    Text(
+                        text = placeholder,
+                        style = textStyle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                innerTextField()
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun InlineTextBlockEditor(
+    block: NoteEditorBlock,
+    editorState: InlineBlockEditorState,
+    linkDefinitions: Map<String, String>,
+    onValueChange: (TextFieldValue) -> Unit,
+    onUpdateHeadingLevel: (Int) -> Unit,
+    onEditLink: (EditableMarkdownLinkSpec?) -> Unit,
+    onDone: () -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val links = remember(editorState.value.text, linkDefinitions) {
+        editableMarkdownLinksForText(editorState.value.text, linkDefinitions)
+    }
+    val usesMultiline = remember(block) { textEditorUsesMultiline(block) }
+    val textStyle = inlineEditorTextStyle(block)
+
+    LaunchedEffect(editorState.blockIndex) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+        delay(180)
+        bringIntoViewRequester.bringIntoView()
+    }
+
+    Column(
+        modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (block is NoteEditorBlock.Heading) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                (1..6).forEach { level ->
+                    FilterChip(
+                        selected = block.level == level,
+                        onClick = { onUpdateHeadingLevel(level) },
+                        label = { Text("H$level") },
+                    )
+                }
+            }
+        }
+        InlineEditorTextField(
+            value = editorState.value,
+            onValueChange = onValueChange,
+            focusRequester = focusRequester,
+            textStyle = textStyle,
+            placeholder = inlineEditorPlaceholder(block),
+            singleLine = !usesMultiline,
+            minLines = if (usesMultiline) 3 else 1,
+            maxLines = if (usesMultiline) 10 else 1,
+            keyboardOptions = if (usesMultiline) {
+                KeyboardOptions.Default
+            } else {
+                KeyboardOptions(imeAction = ImeAction.Done)
+            },
+            keyboardActions = if (usesMultiline) {
+                KeyboardActions()
+            } else {
+                KeyboardActions(onDone = { onDone() })
+            },
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AssistChip(
+                onClick = { onEditLink(null) },
+                label = { Text("Add link") },
+            )
+            links.forEach { link ->
+                AssistChip(
+                    onClick = { onEditLink(link) },
+                    label = {
+                        Text(link.label.ifBlank { link.target }.take(28))
                     },
                 )
             }
+            AssistChip(
+                onClick = onDone,
+                label = { Text("Done") },
+            )
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun InlineListBlockEditor(
+    block: NoteEditorBlock,
+    editorState: InlineBlockEditorState,
+    linkDefinitions: Map<String, String>,
+    onValueChange: (TextFieldValue) -> Unit,
+    onUpdateIndent: (Int) -> Unit,
+    onConvertType: (InlineListBlockKind) -> Unit,
+    onEditLink: (EditableMarkdownLinkSpec?) -> Unit,
+    onDone: () -> Unit,
+) {
+    val focusRequester = remember { FocusRequester() }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val links = remember(editorState.value.text, linkDefinitions) {
+        editableMarkdownLinksForText(editorState.value.text, linkDefinitions)
+    }
+    val indentLevel = when (block) {
+        is NoteEditorBlock.BulletItem -> markdownListIndentLevel(block.indent)
+        is NoteEditorBlock.NumberedItem -> markdownListIndentLevel(block.indent)
+        else -> 0
+    }
+    val marker = when (block) {
+        is NoteEditorBlock.BulletItem -> "\u2022"
+        is NoteEditorBlock.NumberedItem -> "${block.number}."
+        else -> "-"
+    }
+
+    LaunchedEffect(editorState.blockIndex) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+        delay(180)
+        bringIntoViewRequester.bringIntoView()
+    }
+
+    Column(
+        modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(end = 146.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Text(
+                    text = marker,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                InlineEditorTextField(
+                    value = editorState.value,
+                    onValueChange = onValueChange,
+                    focusRequester = focusRequester,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        color = MaterialTheme.colorScheme.onSurface,
+                    ),
+                    placeholder = "List item",
+                    modifier = Modifier.weight(1f),
+                    minLines = 1,
+                    maxLines = 6,
+                    showContainer = false,
+                )
+            }
+            Row(
+                modifier = Modifier.align(Alignment.TopEnd),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                InlineOverlayActionButton(
+                    label = if (block is NoteEditorBlock.BulletItem) "1." else "•",
+                    onClick = {
+                        onConvertType(
+                            if (block is NoteEditorBlock.BulletItem) {
+                                InlineListBlockKind.Numbered
+                            } else {
+                                InlineListBlockKind.Bullet
+                            },
+                        )
+                    },
+                )
+                InlineOverlayActionButton(
+                    label = "←",
+                    onClick = { onUpdateIndent(-1) },
+                )
+                InlineOverlayActionButton(
+                    label = "→",
+                    onClick = { onUpdateIndent(1) },
+                )
+            }
+        }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AssistChip(
+                onClick = { onEditLink(null) },
+                label = { Text("Add link") },
+            )
+            links.forEach { link ->
+                AssistChip(
+                    onClick = { onEditLink(link) },
+                    label = { Text(link.label.ifBlank { link.target }.take(24)) },
+                )
+            }
+            if (indentLevel > 0) {
+                AssistChip(
+                    onClick = {},
+                    label = { Text("Level ${indentLevel + 1}") },
+                )
+            }
+            AssistChip(onClick = onDone, label = { Text("Done") })
+        }
+    }
+}
+
+@Composable
+private fun InlineOverlayActionButton(
+    label: String,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .background(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f),
+                shape = RoundedCornerShape(12.dp),
+            )
+            .size(38.dp),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BlockGestureSurface(
+    onClick: (() -> Unit)?,
+    onLongPress: (() -> Unit)?,
+    content: @Composable () -> Unit,
+) {
+    val modifier = when {
+        onClick != null && onLongPress != null -> Modifier.combinedClickable(
+            onClick = onClick,
+            onLongClick = onLongPress,
+        )
+        onClick != null -> Modifier.clickable(onClick = onClick)
+        onLongPress != null -> Modifier.combinedClickable(
+            onClick = {},
+            onLongClick = onLongPress,
+        )
+        else -> Modifier
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(modifier),
+    ) {
+        content()
     }
 }
 
@@ -3759,17 +4821,43 @@ private fun TaskPreviewRow(
     due: String?,
     remind: String?,
     interactive: Boolean,
+    indentLevel: Int,
+    linkDefinitions: Map<String, String>,
+    selected: Boolean,
+    inlineEditorState: InlineTaskEditorState?,
     isBusy: Boolean,
+    onSelect: (() -> Unit)?,
     onToggle: (() -> Unit)?,
     onEditText: (() -> Unit)?,
     onEditSchedule: (() -> Unit)?,
+    onInlineValueChange: ((TextFieldValue) -> Unit)? = null,
+    onDoneEditing: (() -> Unit)? = null,
     onLongPress: (() -> Unit)?,
     onLinkClick: ((String) -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     val metadata = remember(due, remind) { taskScheduleLabel(due, remind) }
+    val indentPadding = remember(indentLevel) { (indentLevel * 18).dp }
+    val hasSchedule = !due.isNullOrBlank() || !remind.isNullOrBlank()
+    val inlineEditing = inlineEditorState != null
+    val focusRequester = remember { FocusRequester() }
+    val bringIntoViewRequester = remember { BringIntoViewRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(inlineEditorState?.taskRef) {
+        if (inlineEditorState != null) {
+            focusRequester.requestFocus()
+            keyboardController?.show()
+            delay(180)
+            bringIntoViewRequester.bringIntoView()
+        }
+    }
+
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(bringIntoViewRequester)
+            .padding(start = indentPadding),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Row(
@@ -3800,12 +4888,14 @@ private fun TaskPreviewRow(
                 modifier = Modifier
                     .weight(1f)
                     .then(
-                        if ((interactive && onEditText != null && !isBusy) || onLongPress != null) {
+                        if (!inlineEditing && ((interactive && onEditText != null && !isBusy) || onLongPress != null || onSelect != null)) {
                             Modifier.combinedClickable(
                                 enabled = !isBusy,
                                 onClick = {
                                     if (interactive && onEditText != null) {
                                         onEditText()
+                                    } else {
+                                        onSelect?.invoke()
                                     }
                                 },
                                 onLongClick = onLongPress,
@@ -3815,38 +4905,67 @@ private fun TaskPreviewRow(
                         },
                     ),
             ) {
-                MarkdownText(
-                    text = parseInlineMarkdown(text.ifBlank { "Task" }, linkColor),
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        textDecoration = if (checked) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
-                    ),
-                    color = if (checked) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
-                    onLinkClick = if (interactive || onLongPress != null) null else onLinkClick,
-                )
+                if (inlineEditing && inlineEditorState != null && onInlineValueChange != null) {
+                    InlineEditorTextField(
+                        value = inlineEditorState.value,
+                        onValueChange = onInlineValueChange,
+                        focusRequester = focusRequester,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = if (checked) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            textDecoration = if (checked) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+                        ),
+                        placeholder = "Task",
+                        showContainer = false,
+                        minLines = 1,
+                        maxLines = 4,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { onDoneEditing?.invoke() }),
+                    )
+                } else {
+                    MarkdownText(
+                        text = parseInlineMarkdown(text.ifBlank { "Task" }, linkColor, linkDefinitions),
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            textDecoration = if (checked) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+                        ),
+                        color = if (checked) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                        onLinkClick = if (interactive || onLongPress != null || onSelect != null) null else onLinkClick,
+                    )
+                }
             }
 
-            IconButton(
-                onClick = { onEditSchedule?.invoke() },
-                enabled = interactive && onEditSchedule != null && !isBusy,
-                modifier = Modifier.size(32.dp),
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Icon(
-                    imageVector = if (!due.isNullOrBlank() || !remind.isNullOrBlank()) {
-                        Icons.Default.Alarm
-                    } else {
-                        Icons.Default.AlarmOff
-                    },
-                    contentDescription = "Task-Termine",
-                    tint = if (!due.isNullOrBlank() || !remind.isNullOrBlank()) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.outline
-                    },
-                )
+                IconButton(
+                    onClick = { onEditSchedule?.invoke() },
+                    enabled = interactive && onEditSchedule != null && !isBusy,
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Alarm,
+                        contentDescription = if (hasSchedule) "Edit task schedule" else "Add task reminder",
+                        tint = if (hasSchedule) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (selected || inlineEditing) 0.72f else 0.46f)
+                        },
+                    )
+                }
+                if (inlineEditing && onDoneEditing != null) {
+                    InlineOverlayActionButton(
+                        label = "✓",
+                        onClick = onDoneEditing,
+                    )
+                }
             }
         }
 
@@ -3992,6 +5111,157 @@ private fun textEditorUsesMultiline(block: NoteEditorBlock): Boolean {
     }
 }
 
+private fun indentStringForLevel(level: Int): String {
+    return " ".repeat(level.coerceAtLeast(0) * 2)
+}
+
+private data class EditableInlineLinkDestination(
+    val target: String,
+    val nextIndex: Int,
+)
+
+private data class EditableReferenceLink(
+    val target: String,
+    val nextIndex: Int,
+)
+
+private fun editableMarkdownReferenceKey(key: String): String {
+    return key.trim().lowercase().replace(Regex("""\s+"""), " ")
+}
+
+private fun parseEditableInlineLinkDestination(text: String, openParenIndex: Int): EditableInlineLinkDestination? {
+    var index = openParenIndex + 1
+    var nestedParens = 0
+    while (index < text.length) {
+        when (text[index]) {
+            '(' -> nestedParens += 1
+            ')' -> {
+                if (nestedParens == 0) {
+                    val rawDestination = text.substring(openParenIndex + 1, index).trim()
+                    val target = when {
+                        rawDestination.startsWith("<") && rawDestination.contains(">") -> {
+                            rawDestination.substringAfter('<').substringBefore('>').trim()
+                        }
+                        ' ' in rawDestination -> rawDestination.substringBefore(' ').trim()
+                        else -> rawDestination
+                    }
+                    return target.takeIf(String::isNotBlank)?.let {
+                        EditableInlineLinkDestination(target = it, nextIndex = index + 1)
+                    }
+                }
+                nestedParens -= 1
+            }
+        }
+        index += 1
+    }
+    return null
+}
+
+private fun resolveEditableReferenceLink(
+    text: String,
+    closeBracketIndex: Int,
+    label: String,
+    linkDefinitions: Map<String, String>,
+): EditableReferenceLink? {
+    if (closeBracketIndex + 1 >= text.length || text[closeBracketIndex + 1] != '[') {
+        return null
+    }
+    val referenceClose = text.indexOf("]", startIndex = closeBracketIndex + 2)
+    if (referenceClose == -1) {
+        return null
+    }
+    val rawReference = text.substring(closeBracketIndex + 2, referenceClose)
+    val target = linkDefinitions[editableMarkdownReferenceKey(rawReference.ifBlank { label })] ?: return null
+    return EditableReferenceLink(target = target, nextIndex = referenceClose + 1)
+}
+
+private fun editableMarkdownLinksForText(
+    text: String,
+    linkDefinitions: Map<String, String>,
+): List<EditableMarkdownLinkSpec> {
+    val links = mutableListOf<EditableMarkdownLinkSpec>()
+    var index = 0
+    while (index < text.length) {
+        when {
+            text.startsWith("[[", index) -> {
+                val end = text.indexOf("]]", startIndex = index + 2)
+                if (end > index + 2) {
+                    val body = text.substring(index + 2, end)
+                    val target = body.substringBefore('|').trim()
+                    val label = body.substringAfter('|', pageTitleFromPath(target)).trim().ifBlank {
+                        pageTitleFromPath(target)
+                    }
+                    links += EditableMarkdownLinkSpec(
+                        range = androidx.compose.ui.text.TextRange(index, end + 2),
+                        label = label,
+                        target = target,
+                    )
+                    index = end + 2
+                    continue
+                }
+            }
+            text.startsWith("[", index) -> {
+                val close = text.indexOf("]", startIndex = index + 1)
+                val openParen = if (close != -1) text.indexOf("(", startIndex = close + 1) else -1
+                val inlineDestination = if (close > index + 1 && openParen == close + 1) {
+                    parseEditableInlineLinkDestination(text, openParen)
+                } else {
+                    null
+                }
+                if (close > index + 1 && inlineDestination != null) {
+                    links += EditableMarkdownLinkSpec(
+                        range = androidx.compose.ui.text.TextRange(index, inlineDestination.nextIndex),
+                        label = text.substring(index + 1, close),
+                        target = inlineDestination.target,
+                    )
+                    index = inlineDestination.nextIndex
+                    continue
+                } else if (close > index + 1) {
+                    val label = text.substring(index + 1, close)
+                    val explicitReference = resolveEditableReferenceLink(text, close, label, linkDefinitions)
+                    if (explicitReference != null) {
+                        links += EditableMarkdownLinkSpec(
+                            range = androidx.compose.ui.text.TextRange(index, explicitReference.nextIndex),
+                            label = label,
+                            target = explicitReference.target,
+                        )
+                        index = explicitReference.nextIndex
+                        continue
+                    }
+                }
+            }
+            text[index] == '<' -> {
+                val end = text.indexOf(">", startIndex = index + 1)
+                if (end > index + 1) {
+                    val body = text.substring(index + 1, end).trim()
+                    val target = when {
+                        body.startsWith("http://", ignoreCase = true) ||
+                            body.startsWith("https://", ignoreCase = true) ||
+                            body.startsWith("mailto:", ignoreCase = true) -> body
+                        looksLikeAutolinkEmail(body) -> "mailto:$body"
+                        else -> null
+                    }
+                    if (target != null) {
+                        links += EditableMarkdownLinkSpec(
+                            range = androidx.compose.ui.text.TextRange(index, end + 1),
+                            label = body,
+                            target = target,
+                        )
+                        index = end + 1
+                        continue
+                    }
+                }
+            }
+        }
+        index += 1
+    }
+    return links
+}
+
+private fun looksLikeAutolinkEmail(value: String): Boolean {
+    return Regex("""^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$""", RegexOption.IGNORE_CASE).matches(value)
+}
+
 private fun updatedTextEditorBlock(
     block: NoteEditorBlock,
     text: String,
@@ -4089,6 +5359,77 @@ private fun TextBlockEditorSheet(
                                 block = block,
                                 text = textValue.text,
                                 language = languageValue,
+                            ),
+                        )
+                    },
+                ) {
+                    Text("Done")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InlineLinkEditorSheet(
+    state: InlineLinkEditorState,
+    onDismiss: () -> Unit,
+    onSave: (InlineLinkEditorState) -> Unit,
+    onRemove: (() -> Unit)?,
+) {
+    var labelValue by remember(state.blockIndex, state.range, state.label) { mutableStateOf(state.label) }
+    var targetValue by remember(state.blockIndex, state.range, state.target) { mutableStateOf(state.target) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .imePadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = if (state.range != null) "Edit link" else "Add link",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            OutlinedTextField(
+                value = labelValue,
+                onValueChange = { labelValue = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Title") },
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = targetValue,
+                onValueChange = { targetValue = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Link") },
+                singleLine = true,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                onRemove?.let {
+                    TextButton(onClick = it) {
+                        Text("Remove")
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel")
+                }
+                Button(
+                    onClick = {
+                        onSave(
+                            state.copy(
+                                label = labelValue,
+                                target = targetValue,
                             ),
                         )
                     },
@@ -4516,6 +5857,7 @@ private fun InteractiveTablePreview(
     onSelectedCellValueChange: ((String) -> Unit)? = null,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
+    val scrollState = rememberScrollState()
     val columnCount = remember(table) {
         maxOf(table.headers.size, table.rows.maxOfOrNull { it.size } ?: 0, 2)
     }
@@ -4536,10 +5878,17 @@ private fun InteractiveTablePreview(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(0.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (columnCount > 2 || scrollState.maxValue > 0) {
+                Text(
+                    text = "Swipe for more columns ->",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Column(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                modifier = Modifier.horizontalScroll(scrollState),
                 verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 Row(
@@ -4860,10 +6209,13 @@ private fun TableEditorSheet(
 @Composable
 private fun BlockActionMenuSheet(
     lineNumber: Int,
-    canDelete: Boolean,
+    allowDelete: Boolean,
+    showPlacementPicker: Boolean,
     placement: BlockInsertPlacement,
     isUploadingDocument: Boolean,
     onDismiss: () -> Unit,
+    editLabel: String?,
+    onEditCurrent: (() -> Unit)?,
     onPlacementChange: (BlockInsertPlacement) -> Unit,
     onInsertQuery: () -> Unit,
     onUploadFile: () -> Unit,
@@ -4876,26 +6228,34 @@ private fun BlockActionMenuSheet(
     ) {
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(
-                text = if (canDelete) {
+                text = if (allowDelete) {
                     "Block actions · line $lineNumber"
                 } else {
-                    "Add first block"
+                    "Add block"
                 },
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Text(
-                text = if (canDelete) {
-                    "Tap a block to edit it. Long press opens this panel for inserting above or below."
+                text = if (allowDelete) {
+                    "Use this menu to edit the current block or insert something above or below it."
                 } else {
-                    "Choose the first block for this note."
+                    "Choose what to insert here."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
             )
-            if (canDelete) {
+            if (editLabel != null && onEditCurrent != null) {
+                SlashMenuItem(
+                    icon = Icons.Default.Description,
+                    label = editLabel,
+                    onClick = onEditCurrent,
+                )
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            }
+            if (showPlacementPicker) {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -4930,7 +6290,7 @@ private fun BlockActionMenuSheet(
             SlashMenuItem(icon = Icons.Default.Description, label = "Code Block", onClick = { onApplyCommand(NoteSlashCommand.Code) })
             SlashMenuItem(icon = Icons.Default.Description, label = "Table", onClick = { onApplyCommand(NoteSlashCommand.Table) })
             SlashMenuItem(icon = Icons.Default.Description, label = "Image", onClick = { onApplyCommand(NoteSlashCommand.Image) })
-            if (onDelete != null) {
+            if (allowDelete && onDelete != null) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 SlashMenuItem(
                     icon = Icons.Default.Close,
@@ -5961,7 +7321,9 @@ private fun QueryBlockCard(
     block: QueryBlock,
     scopePrefix: String,
     onLinkClick: (String) -> Unit,
+    onClick: (() -> Unit)?,
     onEditQuery: (() -> Unit)?,
+    onOpenActions: (() -> Unit)?,
     onLongPress: (() -> Unit)?,
 ) {
     Card(
@@ -5972,7 +7334,14 @@ private fun QueryBlockCard(
         modifier = Modifier
             .fillMaxWidth()
             .then(
-                if (onLongPress != null) {
+                if (onClick != null && onLongPress != null) {
+                    Modifier.combinedClickable(
+                        onClick = onClick,
+                        onLongClick = onLongPress,
+                    )
+                } else if (onClick != null) {
+                    Modifier.clickable(onClick = onClick)
+                } else if (onLongPress != null) {
                     Modifier.combinedClickable(
                         onClick = {},
                         onLongClick = onLongPress,
@@ -6004,9 +7373,19 @@ private fun QueryBlockCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (onEditQuery != null) {
-                    TextButton(onClick = onEditQuery) {
-                        Text("Edit")
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (onEditQuery != null) {
+                        TextButton(onClick = onEditQuery) {
+                            Text("Edit")
+                        }
+                    }
+                    if (onOpenActions != null) {
+                        IconButton(
+                            onClick = onOpenActions,
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Block actions")
+                        }
                     }
                 }
             }
@@ -7057,7 +8436,12 @@ private fun TaskResultCard(
                 due = task.due,
                 remind = task.remind,
                 interactive = true,
+                indentLevel = 0,
+                linkDefinitions = emptyMap(),
+                selected = false,
+                inlineEditorState = null,
                 isBusy = isBusy,
+                onSelect = null,
                 onToggle = {
                     isBusy = true
                     onPatchTask(
@@ -7073,6 +8457,8 @@ private fun TaskResultCard(
                 },
                 onEditText = null,
                 onEditSchedule = { showScheduleSheet = true },
+                onInlineValueChange = null,
+                onDoneEditing = null,
                 onLongPress = null,
                 onLinkClick = null,
             )
@@ -8390,7 +9776,10 @@ private fun SettingsScreen(
     var authActionError by rememberSaveable { mutableStateOf<String?>(null) }
     var isAuthActionBusy by rememberSaveable { mutableStateOf(false) }
     var showConnectionEditorSheet by rememberSaveable { mutableStateOf(false) }
+    var showNotificationsEditorSheet by rememberSaveable { mutableStateOf(false) }
     var showThemeLibrarySheet by rememberSaveable { mutableStateOf(false) }
+    var showVaultManagerSheet by rememberSaveable { mutableStateOf(false) }
+    var showServerRuntimeSheet by rememberSaveable { mutableStateOf(false) }
     var showVaultEditorSheet by rememberSaveable { mutableStateOf(false) }
     var editingVaultId by rememberSaveable { mutableStateOf<Long?>(null) }
     var vaultNameDraft by rememberSaveable { mutableStateOf("") }
@@ -8405,10 +9794,74 @@ private fun SettingsScreen(
     val currentScopeLabel = remember(settings.scopePrefix, vaults) {
         displayCurrentScopeLabel(settings.scopePrefix, vaults)
     }
+    val connectionSummary = settings.serverUrl.ifBlank { "Not configured" }
+    val connectionSupporting = remember(
+        currentScopeLabel,
+        settings.username,
+        settings.password,
+        settings.bearerToken,
+        settings.startupTab,
+    ) {
+        listOf(
+            "Scope: $currentScopeLabel",
+            if (settings.username.isBlank()) {
+                "Username: not configured"
+            } else {
+                "Username: ${settings.username}"
+            },
+            when {
+                settings.bearerToken.isNotBlank() -> "Auth: bearer token saved"
+                settings.password.isNotBlank() -> "Auth: password saved"
+                else -> "Auth: no credentials stored"
+            },
+            "Open on startup: ${startupTabForValue(settings.startupTab).label}",
+        ).joinToString("\n")
+    }
+    val themeSummary = currentSelectedTheme?.name ?: if (selectedThemeId.equals("system", ignoreCase = true)) {
+        "System default"
+    } else {
+        "Unavailable ($selectedThemeId)"
+    }
+    val notificationsSummary = ntfyTopicUrl.trim().ifBlank { "Not configured" }
+    val notificationsSupporting = if (ntfyToken.isBlank()) {
+        "No notification token stored."
+    } else {
+        "Token saved for this device."
+    }
+    val runtimeSummary = when {
+        isDetailsLoading -> "Loading server details..."
+        serverMeta != null -> serverMeta.indexStatus.summary
+        serverSettings != null -> "Server settings loaded"
+        else -> "Not loaded"
+    }
+    val runtimeSupporting = remember(serverSettings, serverMeta) {
+        buildList {
+            serverMeta?.listenAddr?.takeIf(String::isNotBlank)?.let { add("Listen: $it") }
+            serverMeta?.runtimeVault?.vaultPath?.takeIf(String::isNotBlank)?.let { add("Vault: $it") }
+            serverSettings?.restartRequired?.takeIf { it }?.let {
+                add("Restart required")
+            }
+        }.joinToString("\n").ifBlank { "Refresh to inspect server runtime, vault paths, and watcher state." }
+    }
+    val vaultSupporting = if (vaults.isEmpty()) {
+        "No top-level vaults found."
+    } else {
+        "${vaults.size} top-level vault${if (vaults.size == 1) "" else "s"} available."
+    }
+    val backupSupporting = serverMeta?.runtimeVault?.vaultPath?.takeIf(String::isNotBlank)
+        ?: "Requires loaded server metadata."
 
     if (showConnectionEditorSheet) {
         ModalBottomSheet(
-            onDismissRequest = { showConnectionEditorSheet = false },
+            onDismissRequest = {
+                serverUrl = settings.serverUrl
+                scopePrefix = settings.scopePrefix
+                username = settings.username
+                password = settings.password
+                bearerToken = settings.bearerToken
+                startupTab = startupTabForValue(settings.startupTab).wireValue
+                showConnectionEditorSheet = false
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
             Column(
@@ -8450,7 +9903,15 @@ private fun SettingsScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     TextButton(
-                        onClick = { showConnectionEditorSheet = false },
+                        onClick = {
+                            serverUrl = settings.serverUrl
+                            scopePrefix = settings.scopePrefix
+                            username = settings.username
+                            password = settings.password
+                            bearerToken = settings.bearerToken
+                            startupTab = startupTabForValue(settings.startupTab).wireValue
+                            showConnectionEditorSheet = false
+                        },
                         modifier = Modifier.weight(1f),
                     ) {
                         Text("Cancel")
@@ -8470,6 +9931,73 @@ private fun SettingsScreen(
                         modifier = Modifier.weight(1f),
                     ) {
                         Text("Save")
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+
+    if (showNotificationsEditorSheet) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                ntfyTopicUrl = userSettings.notifications.ntfyTopicUrl
+                ntfyToken = userSettings.notifications.ntfyToken
+                showNotificationsEditorSheet = false
+            },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .imePadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = "Notifications",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                AppTextField(
+                    value = ntfyTopicUrl,
+                    onValueChange = { ntfyTopicUrl = it },
+                    label = "ntfy topic URL",
+                )
+                AppTextField(
+                    value = ntfyToken,
+                    onValueChange = { ntfyToken = it },
+                    label = "ntfy token",
+                    isPassword = true,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    TextButton(
+                        onClick = {
+                            ntfyTopicUrl = userSettings.notifications.ntfyTopicUrl
+                            ntfyToken = userSettings.notifications.ntfyToken
+                            showNotificationsEditorSheet = false
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Cancel")
+                    }
+                    Button(
+                        onClick = {
+                            onSaveUserSettings(ntfyTopicUrl, ntfyToken) { success ->
+                                if (success) {
+                                    ntfyTopicUrl = ntfyTopicUrl.trim()
+                                    ntfyToken = ntfyToken.trim()
+                                    showNotificationsEditorSheet = false
+                                }
+                            }
+                        },
+                        enabled = !isUserSettingsSaving,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (isUserSettingsSaving) "Saving..." else "Save")
                     }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -8640,124 +10168,222 @@ private fun SettingsScreen(
         )
     }
 
+    if (showVaultManagerSheet) {
+        VaultManagementSheet(
+            vaults = vaults,
+            currentScopePrefix = settings.scopePrefix,
+            isBusy = isVaultBusy || isVaultActionBusy,
+            onDismiss = { showVaultManagerSheet = false },
+            onRefresh = onRefreshVaults,
+            onCreateVault = {
+                showVaultManagerSheet = false
+                editingVaultId = null
+                vaultNameDraft = ""
+                vaultActionError = null
+                showVaultEditorSheet = true
+            },
+            onUseVault = { vault ->
+                onSelectVault(vault)
+                showVaultManagerSheet = false
+            },
+            onRenameVault = { vault ->
+                showVaultManagerSheet = false
+                editingVaultId = vault.id
+                vaultNameDraft = displayScopeName(vault)
+                vaultActionError = null
+                showVaultEditorSheet = true
+            },
+        )
+    }
+
+    if (showServerRuntimeSheet) {
+        ServerRuntimeSheet(
+            serverSettings = serverSettings,
+            serverMeta = serverMeta,
+            currentScopePrefix = settings.scopePrefix,
+            vaults = vaults,
+            isLoading = isDetailsLoading,
+            onDismiss = { showServerRuntimeSheet = false },
+            onRefresh = onRefreshDetails,
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 16.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        SettingsSectionCard(title = "Connection") {
-            SettingsInfoRow("Server", settings.serverUrl.ifBlank { "Not configured" })
-            SettingsInfoRow("Scope", currentScopeLabel)
-            SettingsInfoRow("Username", settings.username.ifBlank { "Not configured" })
-            SettingsInfoRow(
-                "Auth",
-                when {
-                    settings.bearerToken.isNotBlank() -> "Bearer token saved"
-                    settings.password.isNotBlank() -> "Password saved"
-                    else -> "No credentials stored"
+        SettingsCategoryHeader("General")
+        SettingsListSection {
+            SettingsNavigationRow(
+                title = "Connection",
+                summary = connectionSummary,
+                supporting = connectionSupporting,
+                onClick = {
+                    serverUrl = settings.serverUrl
+                    scopePrefix = settings.scopePrefix
+                    username = settings.username
+                    password = settings.password
+                    bearerToken = settings.bearerToken
+                    startupTab = startupTabForValue(settings.startupTab).wireValue
+                    showConnectionEditorSheet = true
                 },
             )
-            SettingsInfoRow("Open on startup", startupTabForValue(settings.startupTab).label)
-            Button(
-                onClick = { showConnectionEditorSheet = true },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (settings.serverUrl.isBlank()) "Set up connection" else "Edit connection")
-            }
-        }
-
-        SettingsSectionCard(
-            title = "Appearance",
-            action = {
-                TextButton(
-                    onClick = {
-                        onRefreshThemes()
-                        showThemeLibrarySheet = true
-                    },
-                    enabled = !isThemesLoading && !isThemeBusy,
-                ) {
-                    Text("Library")
-                }
-            },
-        ) {
-            SettingsInfoRow(
-                "Theme",
-                currentSelectedTheme?.name ?: if (selectedThemeId.equals("system", ignoreCase = true)) {
-                    "System default"
-                } else {
-                    "Unavailable ($selectedThemeId)"
-                },
-            )
-            Text(
-                text = "Theme selection is local to this device. Custom themes are shared through the server library.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (isThemesLoading) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            Button(
+            SettingsNavigationRow(
+                title = "Appearance",
+                summary = themeSummary,
+                supporting = "Theme selection is local to this device. Shared themes live in the server library.",
                 onClick = {
                     onRefreshThemes()
                     showThemeLibrarySheet = true
                 },
-                enabled = !isThemeBusy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Choose theme")
-            }
+            )
+            SettingsNavigationRow(
+                title = "Notifications",
+                summary = notificationsSummary,
+                supporting = notificationsSupporting,
+                onClick = {
+                    ntfyTopicUrl = userSettings.notifications.ntfyTopicUrl
+                    ntfyToken = userSettings.notifications.ntfyToken
+                    showNotificationsEditorSheet = true
+                },
+            )
         }
 
-        SettingsSectionCard(title = "User notifications") {
-            AppTextField(
-                value = ntfyTopicUrl,
-                onValueChange = { ntfyTopicUrl = it },
-                label = "ntfy topic URL",
-            )
-            AppTextField(
-                value = ntfyToken,
-                onValueChange = { ntfyToken = it },
-                label = "ntfy token",
-                isPassword = true,
-            )
-            Button(
+        SettingsCategoryHeader("Workspace")
+        SettingsListSection {
+            SettingsNavigationRow(
+                title = "Vaults",
+                summary = currentScopeLabel,
+                supporting = vaultSupporting,
                 onClick = {
-                    onSaveUserSettings(ntfyTopicUrl, ntfyToken) { success ->
-                        if (success) {
-                            ntfyTopicUrl = ntfyTopicUrl.trim()
-                            ntfyToken = ntfyToken.trim()
-                        }
+                    onRefreshVaults()
+                    showVaultManagerSheet = true
+                },
+            )
+            SettingsActionRow(
+                title = "Save backup manifest",
+                summary = backupSupporting,
+                supporting = "Exports a helper manifest for the current server deployment.",
+                enabled = serverMeta != null,
+                onClick = onExportBackupManifest,
+            )
+            SettingsActionRow(
+                title = "Save backup script",
+                summary = backupSupporting,
+                supporting = "Exports a shell script stub for the current server deployment.",
+                enabled = serverMeta != null,
+                onClick = onExportBackupScript,
+            )
+        }
+
+        SettingsCategoryHeader("Server")
+        SettingsListSection {
+            SettingsNavigationRow(
+                title = "Runtime",
+                summary = runtimeSummary,
+                supporting = runtimeSupporting,
+                onClick = {
+                    onRefreshDetails()
+                    showServerRuntimeSheet = true
+                },
+            )
+            SettingsActionRow(
+                title = if (isDetailsLoading) "Refreshing server details..." else "Refresh server details",
+                summary = if (serverMeta == null && serverSettings == null) {
+                    "No server details cached yet."
+                } else {
+                    "Update runtime, vault, and index metadata."
+                },
+                enabled = !isDetailsLoading,
+                onClick = onRefreshDetails,
+            )
+        }
+
+        SettingsCategoryHeader("Account")
+        SettingsListSection {
+            SettingsActionRow(
+                title = "Change password",
+                summary = "Update the password for the current account.",
+                enabled = !isAuthActionBusy,
+                onClick = {
+                    authActionError = null
+                    showChangePasswordSheet = true
+                },
+            )
+            SettingsActionRow(
+                title = "Log out",
+                summary = "Clear saved credentials on this device.",
+                enabled = !isAuthActionBusy,
+                destructive = true,
+                onClick = {
+                    isAuthActionBusy = true
+                    onLogout { _ ->
+                        isAuthActionBusy = false
+                        showChangePasswordSheet = false
+                        authActionError = null
+                        currentPassword = ""
+                        newPassword = ""
+                        confirmPassword = ""
                     }
                 },
-                enabled = !isUserSettingsSaving,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (isUserSettingsSaving) "Saving..." else "Save notifications")
-            }
+            )
         }
+    }
+}
 
-        SettingsSectionCard(
-            title = "Vaults",
-            action = {
-                TextButton(onClick = onRefreshVaults, enabled = !isVaultBusy && !isVaultActionBusy) {
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VaultManagementSheet(
+    vaults: List<VaultRecord>,
+    currentScopePrefix: String,
+    isBusy: Boolean,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onCreateVault: () -> Unit,
+    onUseVault: (VaultRecord) -> Unit,
+    onRenameVault: (VaultRecord) -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Vaults",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "Current scope: ${displayCurrentScopeLabel(currentScopePrefix, vaults)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                TextButton(
+                    onClick = onRefresh,
+                    enabled = !isBusy,
+                ) {
                     Text("Refresh")
                 }
-            },
-        ) {
-            SettingsInfoRow("Current scope", displayCurrentScopeLabel(settings.scopePrefix, vaults))
-            Button(
-                onClick = {
-                    editingVaultId = null
-                    vaultNameDraft = ""
-                    vaultActionError = null
-                    showVaultEditorSheet = true
-                },
-                enabled = !isVaultBusy && !isVaultActionBusy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("New vault")
+                Button(
+                    onClick = onCreateVault,
+                    enabled = !isBusy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("New vault")
+                }
             }
             if (vaults.isEmpty()) {
                 Text(
@@ -8769,19 +10395,17 @@ private fun SettingsScreen(
                 vaults
                     .sortedBy { vault -> displayScopeName(vault).lowercase(Locale.ROOT) }
                     .forEach { vault ->
-                        val isCurrentVault = normalizeScopePrefix(settings.scopePrefix) ==
+                        val isCurrentVault = normalizeScopePrefix(currentScopePrefix) ==
                             normalizeScopePrefix(scopePrefixForVault(vault))
                         Card(
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surface,
-                            ),
-                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+                            shape = RoundedCornerShape(16.dp),
                         ) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
                                 Text(
                                     text = displayScopeName(vault),
@@ -8795,7 +10419,7 @@ private fun SettingsScreen(
                                 )
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 ) {
                                     if (isCurrentVault) {
                                         AssistChip(
@@ -8805,20 +10429,15 @@ private fun SettingsScreen(
                                         )
                                     } else {
                                         TextButton(
-                                            onClick = { onSelectVault(vault) },
-                                            enabled = !isVaultBusy && !isVaultActionBusy,
+                                            onClick = { onUseVault(vault) },
+                                            enabled = !isBusy,
                                         ) {
                                             Text("Use")
                                         }
                                     }
                                     TextButton(
-                                        onClick = {
-                                            editingVaultId = vault.id
-                                            vaultNameDraft = displayScopeName(vault)
-                                            vaultActionError = null
-                                            showVaultEditorSheet = true
-                                        },
-                                        enabled = !isVaultBusy && !isVaultActionBusy,
+                                        onClick = { onRenameVault(vault) },
+                                        enabled = !isBusy,
                                     ) {
                                         Text("Rename")
                                     }
@@ -8827,57 +10446,47 @@ private fun SettingsScreen(
                         }
                     }
             }
+            Spacer(Modifier.height(12.dp))
         }
+    }
+}
 
-        SettingsSectionCard(
-            title = "Backup",
-            action = {
-                TextButton(onClick = onRefreshDetails, enabled = !isDetailsLoading) {
-                    Text("Refresh")
-                }
-            },
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ServerRuntimeSheet(
+    serverSettings: ServerSettingsResponse?,
+    serverMeta: ServerMetaResponse?,
+    currentScopePrefix: String,
+    vaults: List<VaultRecord>,
+    isLoading: Boolean,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (isDetailsLoading) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            serverMeta?.let { meta ->
-                SettingsInfoRow("Vault root", meta.runtimeVault.vaultPath)
-                SettingsInfoRow("Data dir", meta.dataDir)
-                SettingsInfoRow("Index DB", meta.database)
-                meta.currentVault?.vaultPath?.takeIf(String::isNotBlank)?.let { currentVaultPath ->
-                    SettingsInfoRow("Current scope vault", currentVaultPath)
-                }
-            }
             Text(
-                text = "The manifest and shell script describe the current deployment. They are helper files, not the backup itself.",
+                text = "Server runtime",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "Scope: ${displayCurrentScopeLabel(currentScopePrefix, vaults)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(
-                onClick = onExportBackupManifest,
-                enabled = serverMeta != null,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Save backup manifest")
+            TextButton(onClick = onRefresh, enabled = !isLoading) {
+                Text(if (isLoading) "Refreshing..." else "Refresh")
             }
-            Button(
-                onClick = onExportBackupScript,
-                enabled = serverMeta != null,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Save backup script")
-            }
-        }
-
-        SettingsSectionCard(
-            title = "Server runtime",
-            action = {
-                TextButton(onClick = onRefreshDetails, enabled = !isDetailsLoading) {
-                    Text("Refresh")
-                }
-            },
-        ) {
-            if (isDetailsLoading) {
+            if (isLoading) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
             serverSettings?.let { snapshot ->
@@ -8921,46 +10530,129 @@ private fun SettingsScreen(
                     if (meta.notificationEnabled) meta.notificationInterval else "Disabled",
                 )
             }
-            if (!isDetailsLoading && serverSettings == null && serverMeta == null) {
+            if (!isLoading && serverSettings == null && serverMeta == null) {
                 Text(
                     text = "No server details loaded yet.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        }
-
-        SettingsSectionCard(title = "Session") {
-            Button(
-                onClick = {
-                    authActionError = null
-                    showChangePasswordSheet = true
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isAuthActionBusy,
-            ) {
-                Text("Change password")
-            }
-
-            TextButton(
-                onClick = {
-                    isAuthActionBusy = true
-                    onLogout { _ ->
-                        isAuthActionBusy = false
-                        showChangePasswordSheet = false
-                        authActionError = null
-                        currentPassword = ""
-                        newPassword = ""
-                        confirmPassword = ""
-                    }
-                },
-                enabled = !isAuthActionBusy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Log out")
-            }
+            Spacer(Modifier.height(12.dp))
         }
     }
+}
+
+@Composable
+private fun SettingsCategoryHeader(title: String) {
+    Text(
+        text = title.uppercase(Locale.ROOT),
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+    )
+}
+
+@Composable
+private fun SettingsListSection(
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.36f)),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SettingsNavigationRow(
+    title: String,
+    summary: String,
+    supporting: String? = null,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    SettingsListRow(
+        title = title,
+        summary = summary,
+        supporting = supporting,
+        enabled = enabled,
+        onClick = onClick,
+    )
+}
+
+@Composable
+private fun SettingsActionRow(
+    title: String,
+    summary: String,
+    supporting: String? = null,
+    enabled: Boolean = true,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    SettingsListRow(
+        title = title,
+        summary = summary,
+        supporting = supporting,
+        enabled = enabled,
+        destructive = destructive,
+        onClick = onClick,
+    )
+}
+
+@Composable
+private fun SettingsListRow(
+    title: String,
+    summary: String,
+    supporting: String? = null,
+    enabled: Boolean = true,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall,
+            color = when {
+                !enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+                destructive -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurface
+            },
+            fontWeight = FontWeight.Medium,
+        )
+        Text(
+            text = summary.ifBlank { "Not set" },
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (enabled) {
+                MaterialTheme.colorScheme.onSurface
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+        supporting?.takeIf(String::isNotBlank)?.let { supportingText ->
+            Text(
+                text = supportingText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    HorizontalDivider(
+        modifier = Modifier.padding(horizontal = 16.dp),
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
