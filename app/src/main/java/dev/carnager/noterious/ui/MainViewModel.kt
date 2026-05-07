@@ -46,6 +46,7 @@ data class MainUiState(
     val settingsLoaded: Boolean = false,
     val settings: AppSettings = AppSettings(),
     val vaults: List<VaultRecord> = emptyList(),
+    val isVaultsLoading: Boolean = false,
     val pages: List<ApiPageSummary> = emptyList(),
     val templatePages: List<ApiPageSummary> = emptyList(),
     val folders: List<String> = emptyList(),
@@ -179,6 +180,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = null,
                     )
                 }
+                if (!settings.hasCompletedSetup) {
+                    val completedSettings = settings.copy(hasCompletedSetup = true)
+                    settingsRepository.save(completedSettings)
+                    _uiState.update { current -> current.copy(settings = completedSettings) }
+                }
                 reloadOpenPageIfNeeded()
             }.onFailure { error ->
                 _uiState.update {
@@ -189,9 +195,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun fetchVaults() {
+        if (_uiState.value.isVaultsLoading) return
         viewModelScope.launch {
             val settings = settingsRepository.settings.first()
             if (settings.serverUrl.isBlank()) return@launch
+            _uiState.update { it.copy(isVaultsLoading = true) }
             runCatching {
                 repository.fetchVaults(
                     url = settings.serverUrl,
@@ -200,7 +208,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     password = settings.password,
                 )
             }.onSuccess { vaults ->
-                _uiState.update { it.copy(vaults = vaults) }
+                _uiState.update { it.copy(vaults = vaults, isVaultsLoading = false) }
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        isVaultsLoading = false,
+                        error = error.message ?: "Scopes could not be loaded.",
+                    )
+                }
             }
         }
     }
@@ -209,8 +225,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val settings = settingsRepository.settings.first()
             val scopePrefix = scopePrefixForVault(vault)
-            settingsRepository.save(settings.copy(scopePrefix = scopePrefix))
+            settingsRepository.save(
+                settings.copy(
+                    scopePrefix = scopePrefix,
+                    hasCompletedDefaultScopePrompt = true,
+                ),
+            )
             refresh(trigger = "vault-switch")
+        }
+    }
+
+    fun completeDefaultScopePrompt() {
+        viewModelScope.launch {
+            val settings = settingsRepository.settings.first()
+            if (settings.hasCompletedDefaultScopePrompt) {
+                return@launch
+            }
+            settingsRepository.save(settings.copy(hasCompletedDefaultScopePrompt = true))
         }
     }
 
@@ -400,9 +431,88 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     bearerToken = bearerToken,
                     startupTab = startupTab,
                     themeId = _uiState.value.settings.themeId,
+                    hasCompletedSetup = _uiState.value.settings.hasCompletedSetup && serverUrl.isNotBlank(),
+                    hasCompletedDefaultScopePrompt = when {
+                        serverUrl.isBlank() -> false
+                        scopePrefix.isNotBlank() -> true
+                        else -> _uiState.value.settings.hasCompletedDefaultScopePrompt
+                    },
                 ),
             )
             refresh(trigger = "settings")
+        }
+    }
+
+    fun completeInitialSetup(
+        serverUrl: String,
+        username: String,
+        password: String,
+        bearerToken: String,
+        startupTab: String,
+    ) {
+        val normalizedServerUrl = serverUrl.trim()
+        val normalizedUsername = username.trim()
+        val normalizedBearerToken = bearerToken.trim()
+        val hasPartialPasswordAuth = normalizedBearerToken.isBlank() &&
+            (normalizedUsername.isBlank() xor password.isBlank())
+
+        if (normalizedServerUrl.isBlank()) {
+            _uiState.update { it.copy(error = "Enter a server URL first.") }
+            return
+        }
+        if (hasPartialPasswordAuth) {
+            _uiState.update {
+                it.copy(error = "Enter both username and password, or leave both empty.")
+            }
+            return
+        }
+
+        val currentSettings = _uiState.value.settings
+        val candidateSettings = AppSettings(
+            serverUrl = normalizedServerUrl,
+            scopePrefix = currentSettings.scopePrefix,
+            username = normalizedUsername,
+            password = password,
+            bearerToken = normalizedBearerToken,
+            startupTab = startupTab,
+            themeId = currentSettings.themeId,
+            hasCompletedSetup = true,
+            hasCompletedDefaultScopePrompt = currentSettings.scopePrefix.isNotBlank(),
+        )
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, error = null) }
+            runCatching {
+                fetchCollectionsSnapshotForSetup(candidateSettings)
+            }.onSuccess { collections ->
+                settingsRepository.save(candidateSettings)
+                _uiState.update { current ->
+                    current.copy(
+                        settings = candidateSettings,
+                        settingsLoaded = true,
+                        pages = collections.pages ?: current.pages,
+                        folders = collections.folders ?: current.folders,
+                        tasks = collections.tasks ?: current.tasks,
+                        today = collections.today ?: current.today,
+                        isLoading = false,
+                        error = null,
+                    )
+                }
+                fetchVaults()
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = initialSetupErrorMessage(
+                            error = error,
+                            username = normalizedUsername,
+                            password = password,
+                            bearerToken = normalizedBearerToken,
+                        ),
+                    )
+                }
+            }
         }
     }
 
@@ -2821,6 +2931,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private suspend fun fetchCollectionsSnapshotForSetup(settings: AppSettings): CollectionsRefreshResult {
+        val pages = repository.fetchPages(
+            url = settings.serverUrl,
+            scopePrefix = settings.scopePrefix,
+            bearerToken = settings.bearerToken,
+            username = settings.username,
+            password = settings.password,
+        )
+        val folders = runCatching {
+            repository.fetchFolders(
+                url = settings.serverUrl,
+                scopePrefix = settings.scopePrefix,
+                bearerToken = settings.bearerToken,
+                username = settings.username,
+                password = settings.password,
+            )
+        }.getOrNull()
+        val tasks = runCatching {
+            repository.fetchTasks(
+                url = settings.serverUrl,
+                scopePrefix = settings.scopePrefix,
+                bearerToken = settings.bearerToken,
+                username = settings.username,
+                password = settings.password,
+            )
+        }.getOrNull()
+        return CollectionsRefreshResult(
+            pages = pages,
+            folders = folders,
+            tasks = tasks,
+            today = tasks?.let(repository::buildTodaySnapshot),
+        )
+    }
+
     private suspend fun fetchVaultsSnapshot(settings: AppSettings): List<VaultRecord>? {
         return runCatching {
             repository.fetchVaults(
@@ -2876,6 +3020,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return settings.bearerToken.isNotBlank() ||
             settings.username.isBlank() ||
             settings.password.isNotBlank()
+    }
+
+    private fun initialSetupErrorMessage(
+        error: Throwable,
+        username: String,
+        password: String,
+        bearerToken: String,
+    ): String {
+        val rawMessage = error.message.orEmpty()
+        return when {
+            rawMessage.contains("HTTP 401") ||
+                rawMessage.contains("HTTP 403") ||
+                rawMessage.startsWith("Login failed:") ||
+                rawMessage.startsWith("API login failed:") -> when {
+                bearerToken.isNotBlank() -> "Bearer token was rejected. Check it and try again."
+                username.isBlank() && password.isBlank() -> "This server requires authentication. Enter username and password or a bearer token."
+                else -> "Username or password was rejected. Check them and try again."
+            }
+
+            rawMessage.isNotBlank() -> rawMessage
+            else -> "Connection failed."
+        }
     }
 
     private suspend fun buildPageMutationResult(

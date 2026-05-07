@@ -46,7 +46,7 @@ internal enum class NoteSlashCommand {
     Quote,
     Code,
     Table,
-    Image,
+    Document,
 }
 
 internal sealed interface NoteEditorBlock {
@@ -390,7 +390,7 @@ internal fun newBlockForCommand(command: NoteSlashCommand): NoteEditorBlock {
             headers = listOf("Column", "Value"),
             rows = listOf(listOf("", "")),
         )
-        NoteSlashCommand.Image -> NoteEditorBlock.Image(alt = "", target = "")
+        NoteSlashCommand.Document -> NoteEditorBlock.Image(alt = "", target = "")
     }
 }
 

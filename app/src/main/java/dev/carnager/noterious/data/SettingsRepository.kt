@@ -3,6 +3,7 @@ package dev.carnager.noterious.data
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -22,6 +23,8 @@ data class AppSettings(
     val bearerToken: String = "",
     val startupTab: String = "pages",
     val themeId: String = "system",
+    val hasCompletedSetup: Boolean = false,
+    val hasCompletedDefaultScopePrompt: Boolean = false,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -33,6 +36,8 @@ class SettingsRepository(private val context: Context) {
         val BearerToken = stringPreferencesKey("bearer_token")
         val StartupTab = stringPreferencesKey("startup_tab")
         val ThemeId = stringPreferencesKey("theme_id")
+        val SetupComplete = booleanPreferencesKey("setup_complete")
+        val DefaultScopePromptComplete = booleanPreferencesKey("default_scope_prompt_complete")
     }
 
     val settings: Flow<AppSettings> = context.dataStore.data
@@ -52,6 +57,8 @@ class SettingsRepository(private val context: Context) {
                 bearerToken = preferences[Keys.BearerToken].orEmpty(),
                 startupTab = normalizeStartupTab(preferences[Keys.StartupTab]),
                 themeId = normalizeThemeId(preferences[Keys.ThemeId]),
+                hasCompletedSetup = preferences[Keys.SetupComplete] ?: false,
+                hasCompletedDefaultScopePrompt = preferences[Keys.DefaultScopePromptComplete] ?: false,
             )
         }
 
@@ -64,6 +71,8 @@ class SettingsRepository(private val context: Context) {
             preferences[Keys.BearerToken] = settings.bearerToken.trim()
             preferences[Keys.StartupTab] = normalizeStartupTab(settings.startupTab)
             preferences[Keys.ThemeId] = normalizeThemeId(settings.themeId)
+            preferences[Keys.SetupComplete] = settings.hasCompletedSetup
+            preferences[Keys.DefaultScopePromptComplete] = settings.hasCompletedDefaultScopePrompt
         }
     }
 

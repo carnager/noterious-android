@@ -28,6 +28,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -80,6 +81,7 @@ fun MarkdownContent(
     hideQueryFences: Boolean = false,
     linkDefinitions: Map<String, String>? = null,
     onLinkClick: ((String) -> Unit)? = null,
+    onTextClick: (() -> Unit)? = null,
     onImageClick: ((MarkdownImageTarget) -> Unit)? = null,
 ) {
     val effectiveLinkDefinitions = remember(markdown, linkDefinitions) {
@@ -95,21 +97,22 @@ fun MarkdownContent(
     ) {
         blocks.forEach { block ->
             when (block) {
-                is MarkdownBlock.Heading -> MarkdownHeading(block, effectiveLinkDefinitions, onLinkClick)
-                is MarkdownBlock.Paragraph -> MarkdownParagraph(block, effectiveLinkDefinitions, onLinkClick)
-                is MarkdownBlock.BulletItem -> MarkdownBulletItem(block, effectiveLinkDefinitions, onLinkClick)
-                is MarkdownBlock.NumberedItem -> MarkdownNumberedItem(block, effectiveLinkDefinitions, onLinkClick)
-                is MarkdownBlock.TaskItem -> MarkdownTaskItem(block, effectiveLinkDefinitions, onLinkClick)
+                is MarkdownBlock.Heading -> MarkdownHeading(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
+                is MarkdownBlock.Paragraph -> MarkdownParagraph(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
+                is MarkdownBlock.BulletItem -> MarkdownBulletItem(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
+                is MarkdownBlock.NumberedItem -> MarkdownNumberedItem(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
+                is MarkdownBlock.TaskItem -> MarkdownTaskItem(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
                 is MarkdownBlock.BlockQuote -> MarkdownBlockQuote(
                     block = block,
                     currentPagePath = currentPagePath,
                     settings = settings,
                     linkDefinitions = effectiveLinkDefinitions,
                     onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
                     onImageClick = onImageClick,
                 )
                 is MarkdownBlock.CodeFence -> MarkdownCodeFence(block)
-                is MarkdownBlock.Table -> MarkdownTableBlock(block, effectiveLinkDefinitions, onLinkClick)
+                is MarkdownBlock.Table -> MarkdownTableBlock(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
                 is MarkdownBlock.Image -> MarkdownImageBlock(
                     block = block,
                     currentPagePath = currentPagePath,
@@ -123,23 +126,27 @@ fun MarkdownContent(
                     settings = settings,
                     linkDefinitions = effectiveLinkDefinitions,
                     onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
                     onImageClick = onImageClick,
                 )
                 is MarkdownBlock.FootnoteDefinitions -> MarkdownFootnoteDefinitions(
                     block = block,
                     linkDefinitions = effectiveLinkDefinitions,
                     onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
                 )
                 is MarkdownBlock.DefinitionList -> MarkdownDefinitionList(
                     title = "Definitions",
                     block = block,
                     linkDefinitions = effectiveLinkDefinitions,
                     onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
                 )
                 is MarkdownBlock.AbbreviationList -> MarkdownAbbreviationList(
                     block = block,
                     linkDefinitions = effectiveLinkDefinitions,
                     onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
                 )
             }
         }
@@ -151,6 +158,7 @@ private fun MarkdownHeading(
     block: MarkdownBlock.Heading,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     val style = when (block.level) {
@@ -165,6 +173,7 @@ private fun MarkdownHeading(
         color = MaterialTheme.colorScheme.onSurface,
         fontWeight = FontWeight.SemiBold,
         onLinkClick = onLinkClick,
+        onTextClick = onTextClick,
     )
 }
 
@@ -173,6 +182,7 @@ private fun MarkdownParagraph(
     block: MarkdownBlock.Paragraph,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     MarkdownText(
@@ -180,6 +190,7 @@ private fun MarkdownParagraph(
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurface,
         onLinkClick = onLinkClick,
+        onTextClick = onTextClick,
     )
 }
 
@@ -188,6 +199,7 @@ private fun MarkdownBulletItem(
     block: MarkdownBlock.BulletItem,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     Row(
@@ -208,6 +220,7 @@ private fun MarkdownBulletItem(
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
             onLinkClick = onLinkClick,
+            onTextClick = onTextClick,
         )
     }
 }
@@ -217,6 +230,7 @@ private fun MarkdownNumberedItem(
     block: MarkdownBlock.NumberedItem,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     Row(
@@ -237,6 +251,7 @@ private fun MarkdownNumberedItem(
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
             onLinkClick = onLinkClick,
+            onTextClick = onTextClick,
         )
     }
 }
@@ -246,6 +261,7 @@ private fun MarkdownTaskItem(
     block: MarkdownBlock.TaskItem,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     Row(
@@ -266,6 +282,7 @@ private fun MarkdownTaskItem(
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
             onLinkClick = onLinkClick,
+            onTextClick = onTextClick,
         )
     }
 }
@@ -277,6 +294,7 @@ private fun MarkdownBlockQuote(
     settings: AppSettings,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
     onImageClick: ((MarkdownImageTarget) -> Unit)?,
 ) {
     val callout = remember(block.text) { parseMarkdownCallout(block.text) }
@@ -314,6 +332,7 @@ private fun MarkdownBlockQuote(
                 modifier = Modifier.fillMaxWidth(),
                 linkDefinitions = linkDefinitions,
                 onLinkClick = onLinkClick,
+                onTextClick = onTextClick,
                 onImageClick = onImageClick,
             )
         }
@@ -322,23 +341,91 @@ private fun MarkdownBlockQuote(
 
 @Composable
 private fun MarkdownCodeFence(block: MarkdownBlock.CodeFence) {
-    Text(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 320.dp)
-            .verticalScroll(rememberScrollState())
-            .horizontalScroll(rememberScrollState())
-            .background(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-                shape = RoundedCornerShape(14.dp),
-            )
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        text = block.text,
-        style = MaterialTheme.typography.bodySmall,
-        fontFamily = FontFamily.Monospace,
-        color = MaterialTheme.colorScheme.onSurface,
-        softWrap = false,
-    )
+    var expanded by remember(block.language, block.text) { mutableStateOf(false) }
+    val previewText = remember(block.text) {
+        val trimmed = block.text.trimEnd()
+        if (trimmed.isBlank()) {
+            "Empty code block"
+        } else {
+            trimmed
+        }
+    }
+    val lineCount = remember(block.text) {
+        block.text.lines().size.coerceAtLeast(1)
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+        ),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (block.language.isNotBlank()) {
+                        Text(
+                            text = block.language,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Text(
+                        text = if (expanded) {
+                            "$lineCount lines"
+                        } else {
+                            "$lineCount lines · collapsed"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (block.text.isNotBlank()) {
+                    TextButton(onClick = { expanded = !expanded }) {
+                        Text(if (expanded) "Hide code" else "Show code")
+                    }
+                }
+            }
+            if (expanded) {
+                Text(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState())
+                        .horizontalScroll(rememberScrollState()),
+                    text = previewText,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    softWrap = false,
+                )
+            } else {
+                Text(
+                    text = previewText,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -346,6 +433,7 @@ private fun MarkdownTableBlock(
     block: MarkdownBlock.Table,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     val scrollState = rememberScrollState()
@@ -448,6 +536,7 @@ private fun MarkdownTableBlock(
                                     .width(160.dp)
                                     .padding(horizontal = 8.dp),
                                 onLinkClick = onLinkClick,
+                                onTextClick = onTextClick,
                             )
                         }
                     }
@@ -464,6 +553,7 @@ private fun MarkdownDetailsBlock(
     settings: AppSettings,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
     onImageClick: ((MarkdownImageTarget) -> Unit)?,
 ) {
     var expanded by remember(block.summary, block.body) { mutableStateOf(false) }
@@ -495,6 +585,7 @@ private fun MarkdownDetailsBlock(
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                     onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
                 )
                 Icon(
                     imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
@@ -510,6 +601,7 @@ private fun MarkdownDetailsBlock(
                     modifier = Modifier.fillMaxWidth(),
                     linkDefinitions = linkDefinitions,
                     onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
                     onImageClick = onImageClick,
                 )
             }
@@ -593,6 +685,7 @@ private fun MarkdownFootnoteDefinitions(
     block: MarkdownBlock.FootnoteDefinitions,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     Card(
@@ -628,6 +721,7 @@ private fun MarkdownFootnoteDefinitions(
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f),
                         onLinkClick = onLinkClick,
+                        onTextClick = onTextClick,
                     )
                 }
             }
@@ -641,6 +735,7 @@ private fun MarkdownDefinitionList(
     block: MarkdownBlock.DefinitionList,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     Card(
@@ -670,6 +765,7 @@ private fun MarkdownDefinitionList(
                         color = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.SemiBold,
                         onLinkClick = onLinkClick,
+                        onTextClick = onTextClick,
                     )
                     item.definitions.forEach { definition ->
                         MarkdownText(
@@ -678,6 +774,7 @@ private fun MarkdownDefinitionList(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(start = 12.dp),
                             onLinkClick = onLinkClick,
+                            onTextClick = onTextClick,
                         )
                     }
                 }
@@ -691,6 +788,7 @@ private fun MarkdownAbbreviationList(
     block: MarkdownBlock.AbbreviationList,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
+    onTextClick: (() -> Unit)?,
 ) {
     MarkdownDefinitionList(
         title = "Glossary",
@@ -704,6 +802,7 @@ private fun MarkdownAbbreviationList(
         ),
         linkDefinitions = linkDefinitions,
         onLinkClick = onLinkClick,
+        onTextClick = onTextClick,
     )
 }
 
@@ -715,6 +814,7 @@ internal fun MarkdownText(
     modifier: Modifier = Modifier,
     fontWeight: FontWeight? = null,
     onLinkClick: ((String) -> Unit)? = null,
+    onTextClick: (() -> Unit)? = null,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
 ) {
@@ -729,7 +829,7 @@ internal fun MarkdownText(
         end = text.length,
     ).isNotEmpty()
 
-    if (hasLinks && onLinkClick != null) {
+    if ((hasLinks && onLinkClick != null) || onTextClick != null) {
         ClickableText(
             text = text,
             modifier = modifier,
@@ -742,8 +842,8 @@ internal fun MarkdownText(
                 start = offset,
                 end = offset,
             ).firstOrNull()?.let { annotation ->
-                onLinkClick(annotation.item)
-            }
+                onLinkClick?.invoke(annotation.item)
+            } ?: onTextClick?.invoke()
         }
     } else {
         Text(

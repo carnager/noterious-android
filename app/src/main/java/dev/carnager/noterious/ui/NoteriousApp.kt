@@ -351,7 +351,13 @@ fun NoteriousApp(viewModel: MainViewModel) {
     var showDocumentsSheet by remember { mutableStateOf(false) }
     var showQuerySheet by remember { mutableStateOf(false) }
     var queryWorkbenchDraft by rememberSaveable { mutableStateOf("") }
-    var pendingTextExport by remember { mutableStateOf<TextDocumentExport?>(null) }
+    val connectionSetupRequired = uiState.settingsLoaded &&
+        (uiState.settings.serverUrl.isBlank() || !uiState.settings.hasCompletedSetup)
+    val defaultScopePromptRequired = uiState.settingsLoaded &&
+        !connectionSetupRequired &&
+        !uiState.settings.hasCompletedDefaultScopePrompt &&
+        uiState.settings.scopePrefix.isBlank()
+    val setupRequired = connectionSetupRequired || defaultScopePromptRequired
 
     val uploadThemeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) {
@@ -366,29 +372,8 @@ fun NoteriousApp(viewModel: MainViewModel) {
             }
         }
     }
-    val exportDocumentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
-        val export = pendingTextExport
-        pendingTextExport = null
-        if (uri == null || export == null) {
-            return@rememberLauncherForActivityResult
-        }
-        coroutineScope.launch {
-            val message = runCatching {
-                withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { writer ->
-                        writer.write(export.content)
-                    } ?: error("Document could not be created.")
-                }
-                "\"${export.suggestedName}\" saved."
-            }.getOrElse { error ->
-                error.message ?: "Document could not be saved."
-            }
-            snackbarHostState.showSnackbar(message)
-        }
-    }
-
-    LaunchedEffect(uiState.error) {
-        if (uiState.openPagePath == null) {
+    LaunchedEffect(uiState.error, setupRequired) {
+        if (!setupRequired && uiState.openPagePath == null) {
             uiState.error?.let { msg ->
                 snackbarHostState.showSnackbar(msg)
                 viewModel.clearError()
@@ -413,16 +398,49 @@ fun NoteriousApp(viewModel: MainViewModel) {
         uiState.settings.username,
         uiState.settings.password,
         uiState.settings.bearerToken,
+        uiState.settings.hasCompletedSetup,
     ) {
-        if (uiState.settingsLoaded) {
+        if (uiState.settingsLoaded && uiState.settings.hasCompletedSetup) {
             viewModel.ensureThemeLibraryLoaded()
         }
     }
 
-    LaunchedEffect(selectedTab) {
-        if (selectedTab == Tab.Settings) {
-            viewModel.ensureSettingsDetailsLoaded()
-        }
+    if (!uiState.settingsLoaded) {
+        AppStartupLoadingScreen()
+        return
+    }
+
+    if (connectionSetupRequired) {
+        FirstRunSetupScreen(
+            settings = uiState.settings,
+            isConnecting = uiState.isLoading,
+            error = uiState.error,
+            onClearError = { viewModel.clearError() },
+            onSave = { serverUrl, username, password, bearerToken, startupTab ->
+                viewModel.completeInitialSetup(
+                    serverUrl = serverUrl,
+                    username = username,
+                    password = password,
+                    bearerToken = bearerToken,
+                    startupTab = startupTab,
+                )
+            },
+        )
+        return
+    }
+
+    if (defaultScopePromptRequired) {
+        FirstRunDefaultScopeScreen(
+            vaults = uiState.vaults,
+            currentScopePrefix = uiState.settings.scopePrefix,
+            isLoading = uiState.isVaultsLoading || uiState.isLoading,
+            error = uiState.error,
+            onClearError = { viewModel.clearError() },
+            onRefreshVaults = { viewModel.fetchVaults() },
+            onSelectVault = { vault -> viewModel.selectVault(vault) },
+            onSkip = { viewModel.completeDefaultScopePrompt() },
+        )
+        return
     }
 
     fun navigateToTab(tab: Tab) {
@@ -576,12 +594,15 @@ fun NoteriousApp(viewModel: MainViewModel) {
             pageTasks = uiState.openPageTasks,
             derived = uiState.openPageDerived,
             pageHistory = uiState.openPageHistory,
+            documents = uiState.documents,
             settings = uiState.settings,
             error = uiState.error,
             isLoading = uiState.isPageLoading,
             isSaving = uiState.isPageSaving,
             isPageHistoryLoading = uiState.isPageHistoryLoading,
             isPageHistoryBusy = uiState.isPageHistoryBusy,
+            isDocumentsLoading = uiState.isDocumentsLoading,
+            isDocumentsBusy = uiState.isDocumentsBusy,
             onBack = { viewModel.closePage() },
             onOpenPage = { viewModel.openPage(it) },
             onClearError = { viewModel.clearError() },
@@ -622,6 +643,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
             onUploadDocument = { uri, onResult ->
                 viewModel.uploadDocumentForOpenPage(uri, onResult)
             },
+            onFetchDocuments = { viewModel.fetchDocuments() },
             onGenerateQueryCopilot = { intent, onResult ->
                 viewModel.generateQueryCopilot(intent, onResult = onResult)
             },
@@ -644,60 +666,62 @@ fun NoteriousApp(viewModel: MainViewModel) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = uiState.settings.serverUrl.isNotBlank(), onClick = ::openScopePicker)
-                            .padding(vertical = 4.dp),
-                    ) {
-                        Text("Noterious")
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            if (selectedTab != Tab.Settings) {
+                TopAppBar(
+                    title = {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = uiState.settings.serverUrl.isNotBlank(), onClick = ::openScopePicker)
+                                .padding(vertical = 4.dp),
                         ) {
-                            Text(
-                                text = currentScopeLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Icon(
-                                Icons.Default.ArrowDropDown,
-                                contentDescription = "Choose scope",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp),
-                            )
+                            Text("Noterious")
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                Text(
+                                    text = currentScopeLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Icon(
+                                    Icons.Default.ArrowDropDown,
+                                    contentDescription = "Choose scope",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
                         }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                ),
-                actions = {
-                    if (uiState.isLiveSyncConnected) {
-                        Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = "Live",
-                            tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    IconButton(
-                        onClick = ::openScopePicker,
-                        enabled = uiState.settings.serverUrl.isNotBlank(),
-                    ) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = "Change scope")
-                    }
-                    IconButton(onClick = { viewModel.refresh() }) {
-                        Icon(Icons.Default.Sync, contentDescription = "Refresh")
-                    }
-                    IconButton(onClick = { showSlashMenu = true }) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu")
-                    }
-                },
-            )
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                    actions = {
+                        if (uiState.isLiveSyncConnected) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = "Live",
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        IconButton(
+                            onClick = ::openScopePicker,
+                            enabled = uiState.settings.serverUrl.isNotBlank(),
+                        ) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = "Change scope")
+                        }
+                        IconButton(onClick = { viewModel.refresh() }) {
+                            Icon(Icons.Default.Sync, contentDescription = "Refresh")
+                        }
+                        IconButton(onClick = { showSlashMenu = true }) {
+                            Icon(Icons.Default.Menu, contentDescription = "Menu")
+                        }
+                    },
+                )
+            }
         },
         bottomBar = {
             NavigationBar {
@@ -835,19 +859,15 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         settings = uiState.settings,
                         vaults = uiState.vaults,
                         userSettings = uiState.userSettings,
-                        serverSettings = uiState.serverSettings,
-                        serverMeta = uiState.serverMeta,
                         themes = uiState.themes,
-                        isDetailsLoading = uiState.isSettingsDetailsLoading,
                         isThemesLoading = uiState.isThemesLoading,
                         isThemeBusy = uiState.isThemeBusy,
-                        isVaultBusy = uiState.isLoading,
                         isUserSettingsSaving = uiState.isUserSettingsSaving,
                         onSave = { url, scope, user, pass, token, startupTab ->
                             viewModel.saveSettings(url, scope, user, pass, token, startupTab)
                         },
-                        onRefreshDetails = {
-                            viewModel.ensureSettingsDetailsLoaded(force = true)
+                        onRefreshVaults = {
+                            viewModel.fetchVaults()
                         },
                         onRefreshThemes = {
                             viewModel.ensureThemeLibraryLoaded(force = true)
@@ -861,44 +881,8 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         onDeleteTheme = { themeId, onResult ->
                             viewModel.deleteTheme(themeId, onResult)
                         },
-                        onRefreshVaults = {
-                            viewModel.fetchVaults()
-                        },
-                        onCreateVault = { name, onResult ->
-                            viewModel.createVault(name, onResult)
-                        },
-                        onRenameVault = { vault, nextName, onResult ->
-                            viewModel.renameVault(vault, nextName, onResult)
-                        },
-                        onSelectVault = { vault ->
-                            viewModel.selectVault(vault)
-                        },
-                        onExportBackupManifest = {
-                            uiState.serverMeta?.let { meta ->
-                                pendingTextExport = TextDocumentExport(
-                                    suggestedName = backupManifestFilename(meta),
-                                    content = buildBackupManifest(meta),
-                                )
-                                exportDocumentLauncher.launch(backupManifestFilename(meta))
-                            }
-                        },
-                        onExportBackupScript = {
-                            uiState.serverMeta?.let { meta ->
-                                pendingTextExport = TextDocumentExport(
-                                    suggestedName = backupScriptFilename(meta),
-                                    content = buildBackupScript(meta),
-                                )
-                                exportDocumentLauncher.launch(backupScriptFilename(meta))
-                            }
-                        },
                         onSaveUserSettings = { topicUrl, token, onResult ->
                             viewModel.saveUserNotificationSettings(topicUrl, token, onResult)
-                        },
-                        onChangePassword = { currentPassword, newPassword, onResult ->
-                            viewModel.changePassword(currentPassword, newPassword, onResult)
-                        },
-                        onLogout = { onResult ->
-                            viewModel.logout(onResult)
                         },
                     )
                 }
@@ -931,6 +915,307 @@ fun NoteriousApp(viewModel: MainViewModel) {
                 navigateToTab(Tab.Settings)
             },
         )
+    }
+}
+
+@Composable
+private fun AppStartupLoadingScreen() {
+    Scaffold { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                CircularProgressIndicator()
+                Text(
+                    text = "Loading Noterious...",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FirstRunSetupScreen(
+    settings: dev.carnager.noterious.data.AppSettings,
+    isConnecting: Boolean,
+    error: String?,
+    onClearError: () -> Unit,
+    onSave: (serverUrl: String, username: String, password: String, bearerToken: String, startupTab: String) -> Unit,
+) {
+    var serverUrl by rememberSaveable(settings.serverUrl) { mutableStateOf(settings.serverUrl) }
+    var username by rememberSaveable(settings.username) { mutableStateOf(settings.username) }
+    var password by rememberSaveable(settings.password) { mutableStateOf(settings.password) }
+    var bearerToken by rememberSaveable(settings.bearerToken) { mutableStateOf(settings.bearerToken) }
+    var startupTab by rememberSaveable(settings.startupTab) {
+        mutableStateOf(startupTabForValue(settings.startupTab).wireValue)
+    }
+    val canSubmit = serverUrl.trim().isNotBlank() && !isConnecting
+
+    fun updateField(update: () -> Unit) {
+        if (error != null) {
+            onClearError()
+        }
+        update()
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Set up Noterious") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+    ) { innerPadding ->
+        SettingsPageContent(
+            modifier = Modifier
+                .padding(innerPadding)
+                .imePadding(),
+        ) {
+            Text(
+                text = "Connect this phone to your Noterious server before browsing, creating notes, or managing folders.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.36f),
+                ),
+                shape = RoundedCornerShape(20.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = "Connection",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    AppTextField(
+                        value = serverUrl,
+                        onValueChange = { nextValue -> updateField { serverUrl = nextValue } },
+                        label = "Server URL",
+                    )
+                    AppTextField(
+                        value = username,
+                        onValueChange = { nextValue -> updateField { username = nextValue } },
+                        label = "Username",
+                    )
+                    AppTextField(
+                        value = password,
+                        onValueChange = { nextValue -> updateField { password = nextValue } },
+                        label = "Password",
+                        isPassword = true,
+                    )
+                    AppTextField(
+                        value = bearerToken,
+                        onValueChange = { nextValue -> updateField { bearerToken = nextValue } },
+                        label = "Bearer token",
+                        isPassword = true,
+                    )
+                    Text(
+                        text = "Use either username/password or a bearer token, depending on how your server is configured.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            SettingsListSection {
+                StartupTab.entries.forEach { option ->
+                    SettingsChoiceRow(
+                        title = option.label,
+                        summary = if (option == StartupTab.Pages) {
+                            "Open the note browser after launch."
+                        } else {
+                            "Open the task list after launch."
+                        },
+                        selected = startupTab == option.wireValue,
+                        onClick = {
+                            updateField {
+                                startupTab = option.wireValue
+                            }
+                        },
+                    )
+                }
+            }
+            error?.takeIf(String::isNotBlank)?.let { message ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                    shape = RoundedCornerShape(18.dp),
+                ) {
+                    Text(
+                        text = message,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+            if (isConnecting) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Button(
+                onClick = {
+                    onSave(
+                        serverUrl.trim(),
+                        username.trim(),
+                        password,
+                        bearerToken.trim(),
+                        startupTab,
+                    )
+                },
+                enabled = canSubmit,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (isConnecting) "Connecting..." else "Connect and continue")
+            }
+            Text(
+                text = "You can change scope, appearance, and notifications later from Settings.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FirstRunDefaultScopeScreen(
+    vaults: List<VaultRecord>,
+    currentScopePrefix: String,
+    isLoading: Boolean,
+    error: String?,
+    onClearError: () -> Unit,
+    onRefreshVaults: () -> Unit,
+    onSelectVault: (VaultRecord) -> Unit,
+    onSkip: () -> Unit,
+) {
+    val availableVaults = remember(vaults) {
+        vaults.sortedBy { vault -> displayScopeName(vault).lowercase(Locale.ROOT) }
+    }
+
+    LaunchedEffect(Unit) {
+        if (availableVaults.isEmpty()) {
+            onRefreshVaults()
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Choose default scope") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+    ) { innerPadding ->
+        SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
+            Text(
+                text = "Pick one scope for this phone. You can still switch scopes later from the main app bar.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (isLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            error?.takeIf(String::isNotBlank)?.let { message ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                    ),
+                    shape = RoundedCornerShape(18.dp),
+                ) {
+                    Text(
+                        text = message,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                }
+            }
+            if (availableVaults.isEmpty()) {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.36f),
+                    ),
+                    shape = RoundedCornerShape(20.dp),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            text = if (isLoading) "Loading scopes..." else "No scopes found yet",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = if (isLoading) {
+                                "The app is loading scopes from your server."
+                            } else {
+                                "If this server has scopes, refresh. Otherwise continue without a default scope for now."
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else {
+                SettingsListSection {
+                    availableVaults.forEach { vault ->
+                        val vaultScopePrefix = scopePrefixForVault(vault)
+                        SettingsChoiceRow(
+                            title = displayScopeName(vault),
+                            summary = vaultScopePrefix,
+                            selected = normalizeScopePrefix(currentScopePrefix) == normalizeScopePrefix(vaultScopePrefix),
+                            enabled = !isLoading,
+                            onClick = {
+                                onClearError()
+                                onSelectVault(vault)
+                            },
+                        )
+                    }
+                }
+            }
+            TextButton(
+                onClick = {
+                    onClearError()
+                    onRefreshVaults()
+                },
+                enabled = !isLoading,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Refresh scopes")
+            }
+            Button(
+                onClick = {
+                    onClearError()
+                    onSkip()
+                },
+                enabled = !isLoading,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Continue without default scope")
+            }
+        }
     }
 }
 
@@ -1502,12 +1787,15 @@ private fun PageViewerScreen(
     pageTasks: List<ApiTaskItem>,
     derived: DerivedPageResponse?,
     pageHistory: List<PageRevisionRecord>,
+    documents: List<DocumentRecord>,
     settings: dev.carnager.noterious.data.AppSettings,
     error: String?,
     isLoading: Boolean,
     isSaving: Boolean,
     isPageHistoryLoading: Boolean,
     isPageHistoryBusy: Boolean,
+    isDocumentsLoading: Boolean,
+    isDocumentsBusy: Boolean,
     onBack: () -> Unit,
     onOpenPage: (String) -> Unit,
     onClearError: () -> Unit,
@@ -1520,6 +1808,7 @@ private fun PageViewerScreen(
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onPatchFrontmatter: (set: Map<String, kotlinx.serialization.json.JsonElement>, remove: List<String>, onResult: (Boolean) -> Unit) -> Unit,
     onUploadDocument: (Uri, (DocumentRecord?) -> Unit) -> Unit,
+    onFetchDocuments: () -> Unit,
     onGenerateQueryCopilot: (intent: String, onResult: (QueryCopilotResponse?) -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
@@ -1570,6 +1859,7 @@ private fun PageViewerScreen(
     var isPageActionsSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
     var isRenamePageSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
     var isQueryInsertSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
+    var isDocumentInsertSheetVisible by rememberSaveable(pagePath) { mutableStateOf(false) }
     var queryInsertDraft by rememberSaveable(pagePath) { mutableStateOf("") }
     var isGeneratingQuery by rememberSaveable(pagePath) { mutableStateOf(false) }
     var isPerformingPageAction by rememberSaveable(pagePath) { mutableStateOf(false) }
@@ -1605,6 +1895,7 @@ private fun PageViewerScreen(
         isPageActionsSheetVisible = false
         isRenamePageSheetVisible = false
         isQueryInsertSheetVisible = false
+        isDocumentInsertSheetVisible = false
         queryInsertDraft = ""
         isGeneratingQuery = false
         isPerformingPageAction = false
@@ -2210,6 +2501,12 @@ private fun PageViewerScreen(
             blockIndex = target.blockIndex,
             placement = target.placement,
         )
+        if (command == NoteSlashCommand.Document) {
+            blockActionMenuState = null
+            onFetchDocuments()
+            isDocumentInsertSheetVisible = true
+            return
+        }
         insertBlockAtAnchor(
             block = newBlockForCommand(command),
             anchor = pendingBlockInsertAnchor,
@@ -2220,7 +2517,10 @@ private fun PageViewerScreen(
 
     fun deleteBlockAtIndex(blockIndex: Int) {
         if (blockIndex !in guiBlocks.indices) return
-        if (inlineBlockEditorState?.blockIndex == blockIndex) {
+        if (
+            inlineBlockEditorState?.blockIndex == blockIndex ||
+            inlineTaskEditorState?.blockIndex == blockIndex
+        ) {
             closeInlineEditor()
         }
         val nextBlocks = guiBlocks.toMutableList().apply {
@@ -2269,7 +2569,7 @@ private fun PageViewerScreen(
         )
     }
 
-    fun insertUploadedDocument(document: DocumentRecord) {
+    fun insertSelectedDocument(document: DocumentRecord) {
         val markdownLink = markdownLinkForDocument(document, pagePath)
         when (editorMode) {
             NoteEditorMode.Raw -> {
@@ -2306,7 +2606,7 @@ private fun PageViewerScreen(
         onUploadDocument(uri) { document ->
             isUploadingDocument = false
             if (document != null) {
-                insertUploadedDocument(document)
+                insertSelectedDocument(document)
             } else {
                 pendingBlockInsertAnchor = null
             }
@@ -2444,6 +2744,10 @@ private fun PageViewerScreen(
             isRenamePageSheetVisible -> isRenamePageSheetVisible = false
             isPageActionsSheetVisible -> isPageActionsSheetVisible = false
             isQueryInsertSheetVisible && !isGeneratingQuery -> dismissQueryInsertSheet()
+            isDocumentInsertSheetVisible -> {
+                isDocumentInsertSheetVisible = false
+                pendingBlockInsertAnchor = null
+            }
             blockActionMenuState != null -> blockActionMenuState = null
             imageActionTarget != null -> imageActionTarget = null
             inlineLinkEditorState != null -> inlineLinkEditorState = null
@@ -2651,12 +2955,27 @@ private fun PageViewerScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
-                    if (!isDirty && visibleFrontmatterEntries.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    AssistChip(
+                        onClick = { openFrontmatterSheet() },
+                        enabled = editorMode == NoteEditorMode.Preview && !isDirty && !isPatchingFrontmatter,
+                        label = {
+                            Text(
+                                if (visibleFrontmatterEntries.isEmpty()) {
+                                    "Properties"
+                                } else {
+                                    "Properties (${visibleFrontmatterEntries.size})"
+                                },
+                            )
+                        },
+                    )
+
+                    if (isDirty) {
                         Spacer(Modifier.height(8.dp))
-                        FrontmatterPanel(
-                            entries = visibleFrontmatterEntries,
-                            scopePrefix = settings.scopePrefix,
-                            onOpenPage = onOpenPage,
+                        Text(
+                            text = "Save or revert the note before editing properties.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
 
@@ -2679,6 +2998,7 @@ private fun PageViewerScreen(
                         onLinkClick = ::handleLink,
                         onImageClick = ::openImageActions,
                         onEditTextBlock = if (editorMode != NoteEditorMode.Raw) ::openTextBlockEditor else null,
+                        onDeleteBlock = if (editorMode != NoteEditorMode.Raw) ::deleteBlockAtIndex else null,
                         onInlineValueChange = ::updateInlineEditorValue,
                         onCloseInlineEditor = ::closeInlineEditor,
                         onUpdateInlineHeadingLevel = ::updateInlineHeadingLevel,
@@ -2717,6 +3037,7 @@ private fun PageViewerScreen(
                         },
                         onInlineTaskValueChange = ::updateInlineTaskEditorValue,
                         onDoneTaskEditing = ::saveInlineTaskEditor,
+                        onDeleteInlineTaskBlock = if (editorMode != NoteEditorMode.Raw) ::deleteBlockAtIndex else null,
                     )
 
                     if (isDirty && renderedMarkdown.contains("```query")) {
@@ -2943,6 +3264,31 @@ private fun PageViewerScreen(
             onIntentTextChange = { queryInsertDraft = it },
             onUseExample = { queryInsertDraft = it },
             onGenerate = { generateAndInsertQueryBlock(queryInsertDraft) },
+        )
+    }
+
+    if (isDocumentInsertSheetVisible) {
+        DocumentLibrarySheet(
+            documents = documents,
+            scopePrefix = settings.scopePrefix,
+            isLoading = isDocumentsLoading,
+            isBusy = isDocumentsBusy,
+            onDismiss = {
+                if (!isDocumentsBusy) {
+                    isDocumentInsertSheetVisible = false
+                    pendingBlockInsertAnchor = null
+                }
+            },
+            onRefresh = onFetchDocuments,
+            onOpenDocument = {},
+            onRenameDocument = { _, _, _ -> },
+            onDeleteDocument = { _, _ -> },
+            title = "Insert document",
+            supportingText = "Choose a vault file to insert. Images become image blocks; other files become links.",
+            onPickDocument = { document ->
+                insertSelectedDocument(document)
+                isDocumentInsertSheetVisible = false
+            },
         )
     }
 
@@ -3902,6 +4248,7 @@ private fun NotePreviewSurface(
     onLinkClick: (String) -> Unit,
     onImageClick: ((MarkdownImageTarget) -> Unit)?,
     onEditTextBlock: ((Int, Int) -> Unit)?,
+    onDeleteBlock: ((Int) -> Unit)?,
     onInlineValueChange: (TextFieldValue) -> Unit,
     onCloseInlineEditor: () -> Unit,
     onUpdateInlineHeadingLevel: (Int) -> Unit,
@@ -3916,6 +4263,7 @@ private fun NotePreviewSurface(
     onEditTaskSchedule: (ApiTaskItem) -> Unit,
     onInlineTaskValueChange: (TextFieldValue) -> Unit,
     onDoneTaskEditing: () -> Unit,
+    onDeleteInlineTaskBlock: ((Int) -> Unit)?,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -3980,6 +4328,13 @@ private fun NotePreviewSurface(
             } else {
                 null
             }
+            val deleteBlock = if (editInteractionsEnabled && onDeleteBlock != null) {
+                {
+                    onDeleteBlock(blockIndex)
+                }
+            } else {
+                null
+            }
 
             when (item) {
                 is NotePreviewItem.MarkdownBlock -> {
@@ -3995,6 +4350,7 @@ private fun NotePreviewSurface(
                                     )
                                 }
                                 addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                deleteBlock?.let { add(BlockQuickAction("Delete", it)) }
                                 openActions?.let { add(BlockQuickAction("More", it)) }
                             }
                             PreviewBlockFrame(
@@ -4029,6 +4385,7 @@ private fun NotePreviewSurface(
                             } else {
                                 buildList {
                                     addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                    deleteBlock?.let { add(BlockQuickAction("Delete", it)) }
                                     openActions?.let { add(BlockQuickAction("More", it)) }
                                 }
                             }
@@ -4075,6 +4432,7 @@ private fun NotePreviewSurface(
                                     } else {
                                         null
                                     },
+                                    onDeleteBlock = deleteBlock,
                                     onLongPress = openActions,
                                     onLinkClick = if (taskInteractionsEnabled) null else onLinkClick,
                                 )
@@ -4088,6 +4446,10 @@ private fun NotePreviewSurface(
                         is NoteEditorBlock.CodeFence,
                         -> {
                             val inlineEditing = inlineEditor != null && block !is NoteEditorBlock.CodeFence
+                            val editableLinks = remember(block, linkDefinitions) {
+                                blockEditableLinks(block, linkDefinitions)
+                            }
+                            val hasEditableLinks = editableLinks.isNotEmpty()
                             val directInlineEdit = !inlineEditing && shouldOpenInlineEditorDirectly(
                                 block = block,
                                 linkDefinitions = linkDefinitions,
@@ -4105,9 +4467,10 @@ private fun NotePreviewSurface(
                             } else {
                                 buildList {
                                     if (!directInlineEdit) {
-                                    editText?.let { add(BlockQuickAction("Edit", it)) }
+                                        editText?.let { add(BlockQuickAction("Edit", it)) }
                                     }
                                     addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                    deleteBlock?.let { add(BlockQuickAction("Delete", it)) }
                                     openActions?.let { add(BlockQuickAction("More", it)) }
                                 }
                             }
@@ -4141,6 +4504,7 @@ private fun NotePreviewSurface(
                                                 onConvertType = onConvertInlineListBlock,
                                                 onEditLink = onEditInlineLink,
                                                 onDone = onCloseInlineEditor,
+                                                onDelete = { onDeleteBlock?.invoke(item.blockIndex) },
                                             )
                                         }
                                         inlineEditing && block is NoteEditorBlock.NumberedItem -> {
@@ -4153,6 +4517,7 @@ private fun NotePreviewSurface(
                                                 onConvertType = onConvertInlineListBlock,
                                                 onEditLink = onEditInlineLink,
                                                 onDone = onCloseInlineEditor,
+                                                onDelete = { onDeleteBlock?.invoke(item.blockIndex) },
                                             )
                                         }
                                         inlineEditing -> {
@@ -4164,6 +4529,7 @@ private fun NotePreviewSurface(
                                                 onUpdateHeadingLevel = onUpdateInlineHeadingLevel,
                                                 onEditLink = onEditInlineLink,
                                                 onDone = onCloseInlineEditor,
+                                                onDelete = { onDeleteBlock?.invoke(item.blockIndex) },
                                             )
                                         }
                                         block is NoteEditorBlock.Paragraph && isThematicBreakParagraph(block.text) -> {
@@ -4173,13 +4539,30 @@ private fun NotePreviewSurface(
                                             CodeBlockPreviewCard(block)
                                         }
                                         else -> {
+                                            val contentTap = if (editInteractionsEnabled && hasEditableLinks) {
+                                                {
+                                                    if (selected) {
+                                                        editText?.invoke()
+                                                    } else {
+                                                        onSelectBlock(item.blockIndex)
+                                                    }
+                                                    Unit
+                                                }
+                                            } else {
+                                                null
+                                            }
                                             MarkdownContent(
                                                 markdown = blockToMarkdown(block),
                                                 currentPagePath = currentPagePath,
                                                 settings = settings,
                                                 modifier = Modifier.fillMaxWidth(),
                                                 linkDefinitions = linkDefinitions,
-                                                onLinkClick = onLinkClick,
+                                                onLinkClick = when {
+                                                    !editInteractionsEnabled -> onLinkClick
+                                                    hasEditableLinks && !selected -> null
+                                                    else -> onLinkClick
+                                                },
+                                                onTextClick = contentTap,
                                                 onImageClick = onImageClick,
                                             )
                                         }
@@ -4202,6 +4585,7 @@ private fun NotePreviewSurface(
                                     )
                                 }
                                 addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                                deleteBlock?.let { add(BlockQuickAction("Delete", it)) }
                                 openActions?.let { add(BlockQuickAction("More", it)) }
                             }
                             PreviewBlockFrame(
@@ -4244,6 +4628,7 @@ private fun NotePreviewSurface(
                     val actions = buildList {
                         editQuery?.let { add(BlockQuickAction("Edit query", it)) }
                         addBelow?.let { add(BlockQuickAction("Add below", it)) }
+                        deleteBlock?.let { add(BlockQuickAction("Delete", it)) }
                         openActions?.let { add(BlockQuickAction("More", it)) }
                     }
                     PreviewBlockFrame(
@@ -4425,6 +4810,19 @@ private fun ThematicBreakPreview() {
 
 @Composable
 private fun CodeBlockPreviewCard(block: NoteEditorBlock.CodeFence) {
+    var expanded by remember(block.language, block.text) { mutableStateOf(false) }
+    val previewText = remember(block.text) {
+        val trimmed = block.text.trimEnd()
+        if (trimmed.isBlank()) {
+            "Empty code block"
+        } else {
+            trimmed
+        }
+    }
+    val lineCount = remember(block.text) {
+        block.text.lines().size.coerceAtLeast(1)
+    }
+
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
@@ -4438,26 +4836,63 @@ private fun CodeBlockPreviewCard(block: NoteEditorBlock.CodeFence) {
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (block.language.isNotBlank()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (block.language.isNotBlank()) {
+                        Text(
+                            text = block.language,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Text(
+                        text = if (expanded) {
+                            "$lineCount lines"
+                        } else {
+                            "$lineCount lines · collapsed"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (block.text.isNotBlank()) {
+                    TextButton(onClick = { expanded = !expanded }) {
+                        Text(if (expanded) "Hide code" else "Show code")
+                    }
+                }
+            }
+            if (expanded) {
                 Text(
-                    text = block.language,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
+                    text = previewText,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState())
+                        .horizontalScroll(rememberScrollState()),
+                    softWrap = false,
+                )
+            } else {
+                Text(
+                    text = previewText,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
-            Text(
-                text = block.text.ifBlank { "Empty code block" },
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 320.dp)
-                    .verticalScroll(rememberScrollState())
-                    .horizontalScroll(rememberScrollState()),
-                softWrap = false,
-            )
         }
     }
 }
@@ -4562,6 +4997,7 @@ private fun InlineTextBlockEditor(
     onUpdateHeadingLevel: (Int) -> Unit,
     onEditLink: (EditableMarkdownLinkSpec?) -> Unit,
     onDone: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
@@ -4637,6 +5073,16 @@ private fun InlineTextBlockEditor(
                 onClick = onDone,
                 label = { Text("Done") },
             )
+            AssistChip(
+                onClick = onDelete,
+                label = { Text("Delete") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = null,
+                    )
+                },
+            )
         }
     }
 }
@@ -4652,6 +5098,7 @@ private fun InlineListBlockEditor(
     onConvertType: (InlineListBlockKind) -> Unit,
     onEditLink: (EditableMarkdownLinkSpec?) -> Unit,
     onDone: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
@@ -4757,6 +5204,16 @@ private fun InlineListBlockEditor(
                 )
             }
             AssistChip(onClick = onDone, label = { Text("Done") })
+            AssistChip(
+                onClick = onDelete,
+                label = { Text("Delete") },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = null,
+                    )
+                },
+            )
         }
     }
 }
@@ -4780,6 +5237,29 @@ private fun InlineOverlayActionButton(
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun InlineOverlayIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .background(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f),
+                shape = RoundedCornerShape(12.dp),
+            )
+            .size(38.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onSurface,
         )
     }
 }
@@ -4832,6 +5312,7 @@ private fun TaskPreviewRow(
     onEditSchedule: (() -> Unit)?,
     onInlineValueChange: ((TextFieldValue) -> Unit)? = null,
     onDoneEditing: (() -> Unit)? = null,
+    onDeleteBlock: (() -> Unit)? = null,
     onLongPress: (() -> Unit)?,
     onLinkClick: ((String) -> Unit)?,
 ) {
@@ -4964,6 +5445,13 @@ private fun TaskPreviewRow(
                     InlineOverlayActionButton(
                         label = "✓",
                         onClick = onDoneEditing,
+                    )
+                }
+                if (inlineEditing && onDeleteBlock != null) {
+                    InlineOverlayIconButton(
+                        icon = Icons.Default.Delete,
+                        contentDescription = "Delete task block",
+                        onClick = onDeleteBlock,
                     )
                 }
             }
@@ -6289,7 +6777,7 @@ private fun BlockActionMenuSheet(
             SlashMenuItem(icon = Icons.Default.Tune, label = "Query", onClick = onInsertQuery)
             SlashMenuItem(icon = Icons.Default.Description, label = "Code Block", onClick = { onApplyCommand(NoteSlashCommand.Code) })
             SlashMenuItem(icon = Icons.Default.Description, label = "Table", onClick = { onApplyCommand(NoteSlashCommand.Table) })
-            SlashMenuItem(icon = Icons.Default.Description, label = "Image", onClick = { onApplyCommand(NoteSlashCommand.Image) })
+            SlashMenuItem(icon = Icons.Default.Description, label = "Document", onClick = { onApplyCommand(NoteSlashCommand.Document) })
             if (allowDelete && onDelete != null) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 SlashMenuItem(
@@ -7881,10 +8369,14 @@ private fun DocumentLibrarySheet(
     onOpenDocument: (String) -> Unit,
     onRenameDocument: (String, String, (Boolean) -> Unit) -> Unit,
     onDeleteDocument: (String, (Boolean) -> Unit) -> Unit,
+    title: String = "Documents",
+    supportingText: String? = null,
+    onPickDocument: ((DocumentRecord) -> Unit)? = null,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var actionDocumentPath by rememberSaveable { mutableStateOf<String?>(null) }
     var renameDocumentPath by rememberSaveable { mutableStateOf<String?>(null) }
+    val isPickerMode = onPickDocument != null
     val scopedDocuments = remember(documents, scopePrefix) {
         documents.filter { document -> pathWithinScope(document.path, scopePrefix) }
     }
@@ -7928,48 +8420,50 @@ private fun DocumentLibrarySheet(
         }
     }
 
-    selectedDocument?.let { document ->
-        DocumentActionsSheet(
-            document = document,
-            scopePrefix = scopePrefix,
-            isBusy = isBusy,
-            onDismiss = {
-                if (!isBusy) {
+    if (!isPickerMode) {
+        selectedDocument?.let { document ->
+            DocumentActionsSheet(
+                document = document,
+                scopePrefix = scopePrefix,
+                isBusy = isBusy,
+                onDismiss = {
+                    if (!isBusy) {
+                        actionDocumentPath = null
+                    }
+                },
+                onRename = {
+                    renameDocumentPath = document.path
                     actionDocumentPath = null
-                }
-            },
-            onRename = {
-                renameDocumentPath = document.path
-                actionDocumentPath = null
-            },
-            onDelete = {
-                onDeleteDocument(document.path) { success ->
-                    if (success) {
-                        actionDocumentPath = null
+                },
+                onDelete = {
+                    onDeleteDocument(document.path) { success ->
+                        if (success) {
+                            actionDocumentPath = null
+                        }
                     }
-                }
-            },
-        )
-    }
+                },
+            )
+        }
 
-    renameTargetDocument?.let { document ->
-        DocumentPathSheet(
-            documentPath = displayPagePath(document.path, scopePrefix).ifBlank { document.path },
-            isSaving = isBusy,
-            onDismiss = {
-                if (!isBusy) {
-                    renameDocumentPath = null
-                }
-            },
-            onSave = { nextDocumentPath ->
-                onRenameDocument(document.path, nextDocumentPath) { success ->
-                    if (success) {
+        renameTargetDocument?.let { document ->
+            DocumentPathSheet(
+                documentPath = displayPagePath(document.path, scopePrefix).ifBlank { document.path },
+                isSaving = isBusy,
+                onDismiss = {
+                    if (!isBusy) {
                         renameDocumentPath = null
-                        actionDocumentPath = null
                     }
-                }
-            },
-        )
+                },
+                onSave = { nextDocumentPath ->
+                    onRenameDocument(document.path, nextDocumentPath) { success ->
+                        if (success) {
+                            renameDocumentPath = null
+                            actionDocumentPath = null
+                        }
+                    }
+                },
+            )
+        }
     }
 
     ModalBottomSheet(
@@ -7983,7 +8477,7 @@ private fun DocumentLibrarySheet(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "Documents",
+                text = title,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -7997,6 +8491,13 @@ private fun DocumentLibrarySheet(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            supportingText?.let { helperText ->
+                Text(
+                    text = helperText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             if (isLoading) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
@@ -8043,7 +8544,7 @@ private fun DocumentLibrarySheet(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable(enabled = !isBusy) {
-                                    onOpenDocument(document.path)
+                                    onPickDocument?.invoke(document) ?: onOpenDocument(document.path)
                                 },
                             colors = CardDefaults.cardColors(
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
@@ -8088,15 +8589,17 @@ private fun DocumentLibrarySheet(
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
-                                IconButton(
-                                    onClick = { actionDocumentPath = document.path },
-                                    enabled = !isBusy,
-                                ) {
-                                    Icon(
-                                        Icons.Default.MoreVert,
-                                        contentDescription = "File actions",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
+                                if (!isPickerMode) {
+                                    IconButton(
+                                        onClick = { actionDocumentPath = document.path },
+                                        enabled = !isBusy,
+                                    ) {
+                                        Icon(
+                                            Icons.Default.MoreVert,
+                                            contentDescription = "File actions",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -8108,7 +8611,7 @@ private fun DocumentLibrarySheet(
                 horizontalArrangement = Arrangement.End,
             ) {
                 TextButton(onClick = onDismiss, enabled = !isBusy) {
-                    Text("Close")
+                    Text(if (isPickerMode) "Cancel" else "Close")
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -9725,35 +10228,92 @@ private fun writeSharedImageFile(
 
 // ─── Settings Screen ────────────────────────────────────────────────────
 
+private enum class SettingsDestination {
+    Root,
+    Connection,
+    ConnectionServerUrl,
+    ConnectionUsername,
+    ConnectionPassword,
+    ConnectionBearerToken,
+    ConnectionDefaultScope,
+    ConnectionStartupPage,
+    Appearance,
+    Notifications,
+    NotificationsTopicUrl,
+    NotificationsToken,
+}
+
+private fun settingsDestinationParent(destination: SettingsDestination): SettingsDestination? {
+    return when (destination) {
+        SettingsDestination.Root -> null
+        SettingsDestination.Connection,
+        SettingsDestination.Appearance,
+        SettingsDestination.Notifications,
+        -> SettingsDestination.Root
+
+        SettingsDestination.ConnectionServerUrl,
+        SettingsDestination.ConnectionUsername,
+        SettingsDestination.ConnectionPassword,
+        SettingsDestination.ConnectionBearerToken,
+        SettingsDestination.ConnectionDefaultScope,
+        SettingsDestination.ConnectionStartupPage,
+        -> SettingsDestination.Connection
+
+        SettingsDestination.NotificationsTopicUrl,
+        SettingsDestination.NotificationsToken,
+        -> SettingsDestination.Notifications
+    }
+}
+
+private fun settingsDestinationTitle(destination: SettingsDestination): String {
+    return when (destination) {
+        SettingsDestination.Root -> "Settings"
+        SettingsDestination.Connection -> "Connection"
+        SettingsDestination.ConnectionServerUrl -> "Server URL"
+        SettingsDestination.ConnectionUsername -> "Username"
+        SettingsDestination.ConnectionPassword -> "Password"
+        SettingsDestination.ConnectionBearerToken -> "Bearer token"
+        SettingsDestination.ConnectionDefaultScope -> "Default scope"
+        SettingsDestination.ConnectionStartupPage -> "Startup page"
+        SettingsDestination.Appearance -> "Appearance"
+        SettingsDestination.Notifications -> "Notifications"
+        SettingsDestination.NotificationsTopicUrl -> "Topic URL"
+        SettingsDestination.NotificationsToken -> "Token"
+    }
+}
+
+@Composable
+private fun SettingsPageContent(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
+        content = content,
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScreen(
     settings: dev.carnager.noterious.data.AppSettings,
     vaults: List<VaultRecord>,
     userSettings: UserSettingsPayload,
-    serverSettings: ServerSettingsResponse?,
-    serverMeta: ServerMetaResponse?,
     themes: List<ThemeRecord>,
-    isDetailsLoading: Boolean,
     isThemesLoading: Boolean,
     isThemeBusy: Boolean,
-    isVaultBusy: Boolean,
     isUserSettingsSaving: Boolean,
     onSave: (String, String, String, String, String, String) -> Unit,
-    onRefreshDetails: () -> Unit,
+    onRefreshVaults: () -> Unit,
     onRefreshThemes: () -> Unit,
     onSaveThemeSelection: (String) -> Unit,
     onUploadTheme: () -> Unit,
     onDeleteTheme: (String, (Boolean) -> Unit) -> Unit,
-    onRefreshVaults: () -> Unit,
-    onCreateVault: (String, (VaultRecord?) -> Unit) -> Unit,
-    onRenameVault: (VaultRecord, String, (VaultRecord?) -> Unit) -> Unit,
-    onSelectVault: (VaultRecord) -> Unit,
-    onExportBackupManifest: () -> Unit,
-    onExportBackupScript: () -> Unit,
     onSaveUserSettings: (String, String, (Boolean) -> Unit) -> Unit,
-    onChangePassword: (String, String, (Boolean) -> Unit) -> Unit,
-    onLogout: ((Boolean) -> Unit) -> Unit,
 ) {
     var serverUrl by rememberSaveable(settings.serverUrl) { mutableStateOf(settings.serverUrl) }
     var scopePrefix by rememberSaveable(settings.scopePrefix) { mutableStateOf(settings.scopePrefix) }
@@ -9769,775 +10329,441 @@ private fun SettingsScreen(
     var ntfyToken by rememberSaveable(userSettings.notifications.ntfyToken) {
         mutableStateOf(userSettings.notifications.ntfyToken)
     }
-    var showChangePasswordSheet by rememberSaveable { mutableStateOf(false) }
-    var currentPassword by rememberSaveable { mutableStateOf("") }
-    var newPassword by rememberSaveable { mutableStateOf("") }
-    var confirmPassword by rememberSaveable { mutableStateOf("") }
-    var authActionError by rememberSaveable { mutableStateOf<String?>(null) }
-    var isAuthActionBusy by rememberSaveable { mutableStateOf(false) }
-    var showConnectionEditorSheet by rememberSaveable { mutableStateOf(false) }
-    var showNotificationsEditorSheet by rememberSaveable { mutableStateOf(false) }
-    var showThemeLibrarySheet by rememberSaveable { mutableStateOf(false) }
-    var showVaultManagerSheet by rememberSaveable { mutableStateOf(false) }
-    var showServerRuntimeSheet by rememberSaveable { mutableStateOf(false) }
-    var showVaultEditorSheet by rememberSaveable { mutableStateOf(false) }
-    var editingVaultId by rememberSaveable { mutableStateOf<Long?>(null) }
-    var vaultNameDraft by rememberSaveable { mutableStateOf("") }
-    var vaultActionError by rememberSaveable { mutableStateOf<String?>(null) }
-    var isVaultActionBusy by rememberSaveable { mutableStateOf(false) }
+    var destinationName by rememberSaveable { mutableStateOf(SettingsDestination.Root.name) }
+    var editorText by rememberSaveable { mutableStateOf("") }
 
+    val destination = runCatching { SettingsDestination.valueOf(destinationName) }
+        .getOrDefault(SettingsDestination.Root)
     val selectedThemeId = settings.themeId.trim().ifBlank { "system" }
     val currentSelectedTheme = themes.firstOrNull { theme ->
         theme.id.equals(selectedThemeId, ignoreCase = true)
     }
-    val editingVault = vaults.firstOrNull { vault -> vault.id == editingVaultId }
-    val currentScopeLabel = remember(settings.scopePrefix, vaults) {
-        displayCurrentScopeLabel(settings.scopePrefix, vaults)
+    val selectedCustomTheme = themes.firstOrNull { theme ->
+        theme.id.equals(selectedThemeId, ignoreCase = true) && theme.source.equals("custom", ignoreCase = true)
     }
-    val connectionSummary = settings.serverUrl.ifBlank { "Not configured" }
-    val connectionSupporting = remember(
-        currentScopeLabel,
-        settings.username,
-        settings.password,
-        settings.bearerToken,
-        settings.startupTab,
-    ) {
-        listOf(
-            "Scope: $currentScopeLabel",
-            if (settings.username.isBlank()) {
-                "Username: not configured"
-            } else {
-                "Username: ${settings.username}"
-            },
-            when {
-                settings.bearerToken.isNotBlank() -> "Auth: bearer token saved"
-                settings.password.isNotBlank() -> "Auth: password saved"
-                else -> "Auth: no credentials stored"
-            },
-            "Open on startup: ${startupTabForValue(settings.startupTab).label}",
-        ).joinToString("\n")
+    val currentScopeLabel = remember(scopePrefix, vaults) {
+        displayCurrentScopeLabel(scopePrefix, vaults)
     }
+    val defaultScopeSummary = remember(scopePrefix, currentScopeLabel) {
+        if (normalizeScopePrefix(scopePrefix).isBlank()) {
+            "Not set"
+        } else {
+            currentScopeLabel
+        }
+    }
+    val availableVaults = remember(vaults) {
+        vaults.sortedBy { vault -> displayScopeName(vault).lowercase(Locale.ROOT) }
+    }
+    val connectionSummary = compactSettingsUrlSummary(settings.serverUrl)
     val themeSummary = currentSelectedTheme?.name ?: if (selectedThemeId.equals("system", ignoreCase = true)) {
         "System default"
     } else {
         "Unavailable ($selectedThemeId)"
     }
-    val notificationsSummary = ntfyTopicUrl.trim().ifBlank { "Not configured" }
-    val notificationsSupporting = if (ntfyToken.isBlank()) {
-        "No notification token stored."
+    val notificationsSummary = if (userSettings.notifications.ntfyTopicUrl.isBlank()) {
+        "Not configured"
     } else {
-        "Token saved for this device."
+        "Configured"
     }
-    val runtimeSummary = when {
-        isDetailsLoading -> "Loading server details..."
-        serverMeta != null -> serverMeta.indexStatus.summary
-        serverSettings != null -> "Server settings loaded"
-        else -> "Not loaded"
-    }
-    val runtimeSupporting = remember(serverSettings, serverMeta) {
-        buildList {
-            serverMeta?.listenAddr?.takeIf(String::isNotBlank)?.let { add("Listen: $it") }
-            serverMeta?.runtimeVault?.vaultPath?.takeIf(String::isNotBlank)?.let { add("Vault: $it") }
-            serverSettings?.restartRequired?.takeIf { it }?.let {
-                add("Restart required")
-            }
-        }.joinToString("\n").ifBlank { "Refresh to inspect server runtime, vault paths, and watcher state." }
-    }
-    val vaultSupporting = if (vaults.isEmpty()) {
-        "No top-level vaults found."
-    } else {
-        "${vaults.size} top-level vault${if (vaults.size == 1) "" else "s"} available."
-    }
-    val backupSupporting = serverMeta?.runtimeVault?.vaultPath?.takeIf(String::isNotBlank)
-        ?: "Requires loaded server metadata."
 
-    if (showConnectionEditorSheet) {
-        ModalBottomSheet(
-            onDismissRequest = {
-                serverUrl = settings.serverUrl
-                scopePrefix = settings.scopePrefix
-                username = settings.username
-                password = settings.password
-                bearerToken = settings.bearerToken
-                startupTab = startupTabForValue(settings.startupTab).wireValue
-                showConnectionEditorSheet = false
-            },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text(
-                    text = "Edit connection",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                AppTextField(value = serverUrl, onValueChange = { serverUrl = it }, label = "Server URL")
-                AppTextField(value = scopePrefix, onValueChange = { scopePrefix = it }, label = "Scope Prefix")
-                AppTextField(value = username, onValueChange = { username = it }, label = "Username")
-                AppTextField(value = password, onValueChange = { password = it }, label = "Password", isPassword = true)
-                AppTextField(value = bearerToken, onValueChange = { bearerToken = it }, label = "Bearer Token", isPassword = true)
-                Text(
-                    text = "Open on startup",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    StartupTab.entries.forEach { option ->
-                        FilterChip(
-                            selected = startupTab == option.wireValue,
-                            onClick = { startupTab = option.wireValue },
-                            label = { Text(option.label) },
+    fun navigateTo(destination: SettingsDestination) {
+        destinationName = destination.name
+    }
+
+    fun navigateBack() {
+        destinationName = settingsDestinationParent(destination)?.name ?: SettingsDestination.Root.name
+    }
+
+    fun openTextEditor(destination: SettingsDestination, value: String) {
+        editorText = value
+        navigateTo(destination)
+    }
+
+    fun persistConnection(
+        nextServerUrl: String = serverUrl,
+        nextScopePrefix: String = scopePrefix,
+        nextUsername: String = username,
+        nextPassword: String = password,
+        nextBearerToken: String = bearerToken,
+        nextStartupTab: String = startupTab,
+    ) {
+        serverUrl = nextServerUrl
+        scopePrefix = nextScopePrefix
+        username = nextUsername
+        password = nextPassword
+        bearerToken = nextBearerToken
+        startupTab = startupTabForValue(nextStartupTab).wireValue
+        onSave(
+            serverUrl,
+            scopePrefix,
+            username,
+            password,
+            bearerToken,
+            startupTab,
+        )
+    }
+
+    fun persistNotifications(
+        nextTopicUrl: String = ntfyTopicUrl,
+        nextToken: String = ntfyToken,
+    ) {
+        onSaveUserSettings(nextTopicUrl, nextToken) { success ->
+            if (success) {
+                ntfyTopicUrl = nextTopicUrl.trim()
+                ntfyToken = nextToken.trim()
+                navigateBack()
+            }
+        }
+    }
+
+    BackHandler(enabled = destination != SettingsDestination.Root) {
+        navigateBack()
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(settingsDestinationTitle(destination)) },
+                navigationIcon = {
+                    if (destination != SettingsDestination.Root) {
+                        IconButton(onClick = ::navigateBack) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                            )
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
+    ) { innerPadding ->
+        when (destination) {
+            SettingsDestination.Root -> {
+                SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
+                    SettingsListSection {
+                        SettingsNavigationRow(
+                            title = "Connection",
+                            summary = connectionSummary,
+                            onClick = { navigateTo(SettingsDestination.Connection) },
+                        )
+                        SettingsNavigationRow(
+                            title = "Appearance",
+                            summary = themeSummary,
+                            onClick = {
+                                onRefreshThemes()
+                                navigateTo(SettingsDestination.Appearance)
+                            },
+                        )
+                        SettingsNavigationRow(
+                            title = "Notifications",
+                            summary = notificationsSummary,
+                            onClick = { navigateTo(SettingsDestination.Notifications) },
                         )
                     }
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    TextButton(
-                        onClick = {
-                            serverUrl = settings.serverUrl
-                            scopePrefix = settings.scopePrefix
-                            username = settings.username
-                            password = settings.password
-                            bearerToken = settings.bearerToken
-                            startupTab = startupTabForValue(settings.startupTab).wireValue
-                            showConnectionEditorSheet = false
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Cancel")
-                    }
-                    Button(
-                        onClick = {
-                            onSave(
-                                serverUrl,
-                                scopePrefix,
-                                username,
-                                password,
-                                bearerToken,
-                                startupTabForValue(startupTab).wireValue,
-                            )
-                            showConnectionEditorSheet = false
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Save")
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
             }
-        }
-    }
 
-    if (showNotificationsEditorSheet) {
-        ModalBottomSheet(
-            onDismissRequest = {
-                ntfyTopicUrl = userSettings.notifications.ntfyTopicUrl
-                ntfyToken = userSettings.notifications.ntfyToken
-                showNotificationsEditorSheet = false
-            },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text(
-                    text = "Notifications",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                AppTextField(
-                    value = ntfyTopicUrl,
-                    onValueChange = { ntfyTopicUrl = it },
-                    label = "ntfy topic URL",
-                )
-                AppTextField(
-                    value = ntfyToken,
-                    onValueChange = { ntfyToken = it },
-                    label = "ntfy token",
-                    isPassword = true,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    TextButton(
-                        onClick = {
-                            ntfyTopicUrl = userSettings.notifications.ntfyTopicUrl
-                            ntfyToken = userSettings.notifications.ntfyToken
-                            showNotificationsEditorSheet = false
-                        },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Cancel")
-                    }
-                    Button(
-                        onClick = {
-                            onSaveUserSettings(ntfyTopicUrl, ntfyToken) { success ->
-                                if (success) {
-                                    ntfyTopicUrl = ntfyTopicUrl.trim()
-                                    ntfyToken = ntfyToken.trim()
-                                    showNotificationsEditorSheet = false
-                                }
-                            }
-                        },
-                        enabled = !isUserSettingsSaving,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(if (isUserSettingsSaving) "Saving..." else "Save")
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-            }
-        }
-    }
-
-    if (showChangePasswordSheet) {
-        ModalBottomSheet(
-            onDismissRequest = {
-                if (!isAuthActionBusy) {
-                    showChangePasswordSheet = false
-                    authActionError = null
-                }
-            },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text(
-                    text = "Change password",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                AppTextField(
-                    value = currentPassword,
-                    onValueChange = { currentPassword = it },
-                    label = "Current password",
-                    isPassword = true,
-                )
-                AppTextField(
-                    value = newPassword,
-                    onValueChange = { newPassword = it },
-                    label = "New password",
-                    isPassword = true,
-                )
-                AppTextField(
-                    value = confirmPassword,
-                    onValueChange = { confirmPassword = it },
-                    label = "Confirm new password",
-                    isPassword = true,
-                )
-                authActionError?.takeIf(String::isNotBlank)?.let { message ->
+            SettingsDestination.Connection -> {
+                SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
                     Text(
-                        text = message,
+                        text = "Choose which scope this device opens by default. You can still switch scopes temporarily from the main app bar.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    TextButton(
-                        onClick = {
-                            showChangePasswordSheet = false
-                            authActionError = null
-                        },
-                        enabled = !isAuthActionBusy,
-                    ) {
-                        Text("Cancel")
-                    }
-                    Button(
-                        onClick = {
-                            authActionError = when {
-                                currentPassword.isBlank() -> "Current password is required."
-                                newPassword.isBlank() -> "New password is required."
-                                newPassword != confirmPassword -> "New passwords do not match."
-                                else -> null
-                            }
-                            if (authActionError != null) {
-                                return@Button
-                            }
-                            isAuthActionBusy = true
-                            onChangePassword(currentPassword, newPassword) { success ->
-                                isAuthActionBusy = false
-                                if (success) {
-                                    currentPassword = ""
-                                    newPassword = ""
-                                    confirmPassword = ""
-                                    authActionError = null
-                                    showChangePasswordSheet = false
-                                }
-                            }
-                        },
-                        enabled = !isAuthActionBusy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Update")
+                    SettingsListSection {
+                        SettingsNavigationRow(
+                            title = "Server URL",
+                            summary = serverUrl.ifBlank { "Not configured" },
+                            onClick = { openTextEditor(SettingsDestination.ConnectionServerUrl, serverUrl) },
+                        )
+                        SettingsNavigationRow(
+                            title = "Username",
+                            summary = username.ifBlank { "Not configured" },
+                            onClick = { openTextEditor(SettingsDestination.ConnectionUsername, username) },
+                        )
+                        SettingsNavigationRow(
+                            title = "Password",
+                            summary = if (password.isBlank()) "Not stored" else "Stored on this device",
+                            onClick = { openTextEditor(SettingsDestination.ConnectionPassword, password) },
+                        )
+                        SettingsNavigationRow(
+                            title = "Bearer token",
+                            summary = if (bearerToken.isBlank()) "Not stored" else "Stored on this device",
+                            onClick = { openTextEditor(SettingsDestination.ConnectionBearerToken, bearerToken) },
+                        )
+                        SettingsNavigationRow(
+                            title = "Default scope",
+                            summary = defaultScopeSummary,
+                            onClick = {
+                                onRefreshVaults()
+                                navigateTo(SettingsDestination.ConnectionDefaultScope)
+                            },
+                        )
+                        SettingsNavigationRow(
+                            title = "Startup page",
+                            summary = startupTabForValue(startupTab).label,
+                            onClick = { navigateTo(SettingsDestination.ConnectionStartupPage) },
+                        )
                     }
                 }
-                Spacer(Modifier.height(12.dp))
             }
-        }
-    }
 
-    if (showThemeLibrarySheet) {
-        ThemeLibrarySheet(
-            selectedThemeId = selectedThemeId,
-            themes = themes,
-            isLoading = isThemesLoading,
-            isBusy = isThemeBusy,
-            onDismiss = { showThemeLibrarySheet = false },
-            onRefresh = onRefreshThemes,
-            onSelectTheme = onSaveThemeSelection,
-            onUploadTheme = onUploadTheme,
-            onDeleteTheme = onDeleteTheme,
-        )
-    }
-
-    if (showVaultEditorSheet) {
-        VaultEditorSheet(
-            title = if (editingVault != null) "Rename vault" else "New vault",
-            value = vaultNameDraft,
-            error = vaultActionError,
-            isBusy = isVaultBusy || isVaultActionBusy,
-            onValueChange = {
-                vaultNameDraft = it
-                vaultActionError = null
-            },
-            onDismiss = {
-                if (!isVaultBusy && !isVaultActionBusy) {
-                    showVaultEditorSheet = false
-                    editingVaultId = null
-                    vaultActionError = null
-                }
-            },
-            onConfirm = {
-                val normalizedVaultName = vaultNameDraft.trim()
-                vaultActionError = if (normalizedVaultName.isBlank()) {
-                    "Vault name is required."
-                } else {
-                    null
-                }
-                if (vaultActionError != null) {
-                    return@VaultEditorSheet
-                }
-
-                isVaultActionBusy = true
-                val currentEditingVault = editingVault
-                if (currentEditingVault != null) {
-                    onRenameVault(currentEditingVault, normalizedVaultName) { updatedVault ->
-                        isVaultActionBusy = false
-                        if (updatedVault != null) {
-                            vaultNameDraft = ""
-                            editingVaultId = null
-                            vaultActionError = null
-                            showVaultEditorSheet = false
-                        }
-                    }
-                } else {
-                    onCreateVault(normalizedVaultName) { createdVault ->
-                        isVaultActionBusy = false
-                        if (createdVault != null) {
-                            vaultNameDraft = ""
-                            editingVaultId = null
-                            vaultActionError = null
-                            showVaultEditorSheet = false
-                        }
-                    }
-                }
-            },
-        )
-    }
-
-    if (showVaultManagerSheet) {
-        VaultManagementSheet(
-            vaults = vaults,
-            currentScopePrefix = settings.scopePrefix,
-            isBusy = isVaultBusy || isVaultActionBusy,
-            onDismiss = { showVaultManagerSheet = false },
-            onRefresh = onRefreshVaults,
-            onCreateVault = {
-                showVaultManagerSheet = false
-                editingVaultId = null
-                vaultNameDraft = ""
-                vaultActionError = null
-                showVaultEditorSheet = true
-            },
-            onUseVault = { vault ->
-                onSelectVault(vault)
-                showVaultManagerSheet = false
-            },
-            onRenameVault = { vault ->
-                showVaultManagerSheet = false
-                editingVaultId = vault.id
-                vaultNameDraft = displayScopeName(vault)
-                vaultActionError = null
-                showVaultEditorSheet = true
-            },
-        )
-    }
-
-    if (showServerRuntimeSheet) {
-        ServerRuntimeSheet(
-            serverSettings = serverSettings,
-            serverMeta = serverMeta,
-            currentScopePrefix = settings.scopePrefix,
-            vaults = vaults,
-            isLoading = isDetailsLoading,
-            onDismiss = { showServerRuntimeSheet = false },
-            onRefresh = onRefreshDetails,
-        )
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        SettingsCategoryHeader("General")
-        SettingsListSection {
-            SettingsNavigationRow(
-                title = "Connection",
-                summary = connectionSummary,
-                supporting = connectionSupporting,
-                onClick = {
-                    serverUrl = settings.serverUrl
-                    scopePrefix = settings.scopePrefix
-                    username = settings.username
-                    password = settings.password
-                    bearerToken = settings.bearerToken
-                    startupTab = startupTabForValue(settings.startupTab).wireValue
-                    showConnectionEditorSheet = true
-                },
-            )
-            SettingsNavigationRow(
-                title = "Appearance",
-                summary = themeSummary,
-                supporting = "Theme selection is local to this device. Shared themes live in the server library.",
-                onClick = {
-                    onRefreshThemes()
-                    showThemeLibrarySheet = true
-                },
-            )
-            SettingsNavigationRow(
-                title = "Notifications",
-                summary = notificationsSummary,
-                supporting = notificationsSupporting,
-                onClick = {
-                    ntfyTopicUrl = userSettings.notifications.ntfyTopicUrl
-                    ntfyToken = userSettings.notifications.ntfyToken
-                    showNotificationsEditorSheet = true
-                },
-            )
-        }
-
-        SettingsCategoryHeader("Workspace")
-        SettingsListSection {
-            SettingsNavigationRow(
-                title = "Vaults",
-                summary = currentScopeLabel,
-                supporting = vaultSupporting,
-                onClick = {
-                    onRefreshVaults()
-                    showVaultManagerSheet = true
-                },
-            )
-            SettingsActionRow(
-                title = "Save backup manifest",
-                summary = backupSupporting,
-                supporting = "Exports a helper manifest for the current server deployment.",
-                enabled = serverMeta != null,
-                onClick = onExportBackupManifest,
-            )
-            SettingsActionRow(
-                title = "Save backup script",
-                summary = backupSupporting,
-                supporting = "Exports a shell script stub for the current server deployment.",
-                enabled = serverMeta != null,
-                onClick = onExportBackupScript,
-            )
-        }
-
-        SettingsCategoryHeader("Server")
-        SettingsListSection {
-            SettingsNavigationRow(
-                title = "Runtime",
-                summary = runtimeSummary,
-                supporting = runtimeSupporting,
-                onClick = {
-                    onRefreshDetails()
-                    showServerRuntimeSheet = true
-                },
-            )
-            SettingsActionRow(
-                title = if (isDetailsLoading) "Refreshing server details..." else "Refresh server details",
-                summary = if (serverMeta == null && serverSettings == null) {
-                    "No server details cached yet."
-                } else {
-                    "Update runtime, vault, and index metadata."
-                },
-                enabled = !isDetailsLoading,
-                onClick = onRefreshDetails,
-            )
-        }
-
-        SettingsCategoryHeader("Account")
-        SettingsListSection {
-            SettingsActionRow(
-                title = "Change password",
-                summary = "Update the password for the current account.",
-                enabled = !isAuthActionBusy,
-                onClick = {
-                    authActionError = null
-                    showChangePasswordSheet = true
-                },
-            )
-            SettingsActionRow(
-                title = "Log out",
-                summary = "Clear saved credentials on this device.",
-                enabled = !isAuthActionBusy,
-                destructive = true,
-                onClick = {
-                    isAuthActionBusy = true
-                    onLogout { _ ->
-                        isAuthActionBusy = false
-                        showChangePasswordSheet = false
-                        authActionError = null
-                        currentPassword = ""
-                        newPassword = ""
-                        confirmPassword = ""
-                    }
-                },
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun VaultManagementSheet(
-    vaults: List<VaultRecord>,
-    currentScopePrefix: String,
-    isBusy: Boolean,
-    onDismiss: () -> Unit,
-    onRefresh: () -> Unit,
-    onCreateVault: () -> Unit,
-    onUseVault: (VaultRecord) -> Unit,
-    onRenameVault: (VaultRecord) -> Unit,
-) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                text = "Vaults",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = "Current scope: ${displayCurrentScopeLabel(currentScopePrefix, vaults)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                TextButton(
-                    onClick = onRefresh,
-                    enabled = !isBusy,
-                ) {
-                    Text("Refresh")
-                }
-                Button(
-                    onClick = onCreateVault,
-                    enabled = !isBusy,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("New vault")
-                }
-            }
-            if (vaults.isEmpty()) {
-                Text(
-                    text = "No top-level vaults found yet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                vaults
-                    .sortedBy { vault -> displayScopeName(vault).lowercase(Locale.ROOT) }
-                    .forEach { vault ->
-                        val isCurrentVault = normalizeScopePrefix(currentScopePrefix) ==
-                            normalizeScopePrefix(scopePrefixForVault(vault))
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
-                            shape = RoundedCornerShape(16.dp),
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Text(
-                                    text = displayScopeName(vault),
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                                Text(
-                                    text = vault.vaultPath.ifBlank { "Vault path unavailable" },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                ) {
-                                    if (isCurrentVault) {
-                                        AssistChip(
-                                            onClick = {},
-                                            enabled = false,
-                                            label = { Text("Current") },
-                                        )
-                                    } else {
-                                        TextButton(
-                                            onClick = { onUseVault(vault) },
-                                            enabled = !isBusy,
-                                        ) {
-                                            Text("Use")
-                                        }
-                                    }
-                                    TextButton(
-                                        onClick = { onRenameVault(vault) },
-                                        enabled = !isBusy,
-                                    ) {
-                                        Text("Rename")
-                                    }
-                                }
-                            }
-                        }
-                    }
-            }
-            Spacer(Modifier.height(12.dp))
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ServerRuntimeSheet(
-    serverSettings: ServerSettingsResponse?,
-    serverMeta: ServerMetaResponse?,
-    currentScopePrefix: String,
-    vaults: List<VaultRecord>,
-    isLoading: Boolean,
-    onDismiss: () -> Unit,
-    onRefresh: () -> Unit,
-) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                text = "Server runtime",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = "Scope: ${displayCurrentScopeLabel(currentScopePrefix, vaults)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            TextButton(onClick = onRefresh, enabled = !isLoading) {
-                Text(if (isLoading) "Refreshing..." else "Refresh")
-            }
-            if (isLoading) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            serverSettings?.let { snapshot ->
-                SettingsInfoRow("Vault root", snapshot.settings.vault.vaultPath)
-                SettingsInfoRow("Applied vault", snapshot.appliedVault.vaultPath)
-                SettingsInfoRow("Notification interval", snapshot.settings.notifications.ntfyInterval)
-                SettingsInfoRow("Upload placement", displayUploadPlacement(snapshot.settings.documents.uploadPlacement))
-                snapshot.settings.documents.uploadSubfolder.takeIf(String::isNotBlank)?.let { subfolder ->
-                    SettingsInfoRow("Upload subfolder", subfolder)
-                }
-                SettingsInfoRow("Restart required", if (snapshot.restartRequired) "Yes" else "No")
-                if (snapshot.restartRequiredReasons.isNotEmpty()) {
-                    SettingsInfoRow("Restart reasons", snapshot.restartRequiredReasons.joinToString("\n"))
-                }
-            }
-            serverMeta?.let { meta ->
-                if (serverSettings != null) {
-                    HorizontalDivider()
-                }
-                SettingsInfoRow("Listen address", meta.listenAddr)
-                SettingsInfoRow("Server time", meta.serverTime)
-                SettingsInfoRow("Database", meta.database)
-                SettingsInfoRow("Index", meta.indexStatus.summary)
-                SettingsInfoRow(
-                    "Vault health",
-                    if (meta.vaultHealth.healthy) {
-                        "Healthy"
-                    } else {
-                        listOf("Unhealthy", meta.vaultHealth.reason, meta.vaultHealth.message)
-                            .filter(String::isNotBlank)
-                            .joinToString(" · ")
+            SettingsDestination.ConnectionServerUrl -> {
+                SettingsTextEntryPage(
+                    modifier = Modifier.padding(innerPadding),
+                    value = editorText,
+                    onValueChange = { editorText = it },
+                    label = "Server URL",
+                    supporting = "Example: https://notes.example.com",
+                    onSave = {
+                        persistConnection(nextServerUrl = editorText.trim())
+                        navigateBack()
                     },
                 )
-                meta.currentVault?.vaultPath?.takeIf(String::isNotBlank)?.let { currentVaultPath ->
-                    SettingsInfoRow("Current scope vault", currentVaultPath)
+            }
+
+            SettingsDestination.ConnectionUsername -> {
+                SettingsTextEntryPage(
+                    modifier = Modifier.padding(innerPadding),
+                    value = editorText,
+                    onValueChange = { editorText = it },
+                    label = "Username",
+                    supporting = "Stored locally on this device.",
+                    onSave = {
+                        persistConnection(nextUsername = editorText.trim())
+                        navigateBack()
+                    },
+                )
+            }
+
+            SettingsDestination.ConnectionPassword -> {
+                SettingsTextEntryPage(
+                    modifier = Modifier.padding(innerPadding),
+                    value = editorText,
+                    onValueChange = { editorText = it },
+                    label = "Password",
+                    supporting = "Leave empty to clear the saved password.",
+                    isPassword = true,
+                    onSave = {
+                        persistConnection(nextPassword = editorText)
+                        navigateBack()
+                    },
+                )
+            }
+
+            SettingsDestination.ConnectionBearerToken -> {
+                SettingsTextEntryPage(
+                    modifier = Modifier.padding(innerPadding),
+                    value = editorText,
+                    onValueChange = { editorText = it },
+                    label = "Bearer token",
+                    supporting = "Leave empty to clear the saved token.",
+                    isPassword = true,
+                    onSave = {
+                        persistConnection(nextBearerToken = editorText.trim())
+                        navigateBack()
+                    },
+                )
+            }
+
+            SettingsDestination.ConnectionDefaultScope -> {
+                SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
+                    Text(
+                        text = "Pick one scope to open by default on this device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (availableVaults.isEmpty()) {
+                        SettingsListSection {
+                            SettingsActionRow(
+                                title = "Refresh available scopes",
+                                summary = if (serverUrl.isBlank()) {
+                                    "Set a server URL first."
+                                } else {
+                                    "Load scopes from the server."
+                                },
+                                enabled = serverUrl.isNotBlank(),
+                                onClick = onRefreshVaults,
+                            )
+                        }
+                    } else {
+                        SettingsListSection {
+                            availableVaults.forEach { vault ->
+                                val vaultScopePrefix = scopePrefixForVault(vault)
+                                SettingsChoiceRow(
+                                    title = displayScopeName(vault),
+                                    summary = vaultScopePrefix,
+                                    selected = normalizeScopePrefix(scopePrefix) == normalizeScopePrefix(vaultScopePrefix),
+                                    onClick = {
+                                        persistConnection(nextScopePrefix = vaultScopePrefix)
+                                        navigateBack()
+                                    },
+                                )
+                            }
+                        }
+                    }
                 }
-                SettingsInfoRow("Runtime vault", meta.runtimeVault.vaultPath)
-                SettingsInfoRow("Watcher", if (meta.watcherEnabled) meta.watchInterval else "Disabled")
-                SettingsInfoRow(
-                    "Notifications runtime",
-                    if (meta.notificationEnabled) meta.notificationInterval else "Disabled",
+            }
+
+            SettingsDestination.ConnectionStartupPage -> {
+                SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
+                    SettingsListSection {
+                        StartupTab.entries.forEach { option ->
+                            SettingsChoiceRow(
+                                title = option.label,
+                                summary = if (option == StartupTab.Pages) {
+                                    "Open the note browser when the app launches."
+                                } else {
+                                    "Open the task list when the app launches."
+                                },
+                                selected = startupTab == option.wireValue,
+                                onClick = {
+                                    persistConnection(nextStartupTab = option.wireValue)
+                                    navigateBack()
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
+            SettingsDestination.Appearance -> {
+                SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
+                    Text(
+                        text = "Theme selection is local to this device. Custom themes come from the shared server theme library.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (isThemesLoading) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    SettingsListSection {
+                        SettingsChoiceRow(
+                            title = "System default",
+                            summary = "Follow the device theme and use the built-in mobile palette.",
+                            selected = selectedThemeId.equals("system", ignoreCase = true),
+                            onClick = { onSaveThemeSelection("system") },
+                        )
+                        themes
+                            .sortedBy { theme -> theme.name.lowercase(Locale.ROOT) }
+                            .forEach { theme ->
+                                SettingsChoiceRow(
+                                    title = theme.name.ifBlank { theme.id },
+                                    summary = listOf(
+                                        themeBadge(theme),
+                                        theme.description.takeIf(String::isNotBlank),
+                                    ).joinToString(" · "),
+                                    selected = theme.id.equals(selectedThemeId, ignoreCase = true),
+                                    onClick = { onSaveThemeSelection(theme.id) },
+                                )
+                            }
+                    }
+                    SettingsListSection {
+                        SettingsActionRow(
+                            title = "Upload theme JSON",
+                            summary = "Add a custom theme to the shared theme library.",
+                            enabled = !isThemeBusy,
+                            onClick = onUploadTheme,
+                        )
+                        selectedCustomTheme?.let { theme ->
+                            SettingsActionRow(
+                                title = "Delete selected custom theme",
+                                summary = theme.name.ifBlank { theme.id },
+                                enabled = !isThemeBusy,
+                                destructive = true,
+                                onClick = { onDeleteTheme(theme.id) { _ -> } },
+                            )
+                        }
+                    }
+                }
+            }
+
+            SettingsDestination.Notifications -> {
+                SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
+                    Text(
+                        text = "These settings are device-specific and control where this phone sends note reminders.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    SettingsListSection {
+                        SettingsNavigationRow(
+                            title = "Topic URL",
+                            summary = ntfyTopicUrl.ifBlank { "Not configured" },
+                            onClick = { openTextEditor(SettingsDestination.NotificationsTopicUrl, ntfyTopicUrl) },
+                        )
+                        SettingsNavigationRow(
+                            title = "Token",
+                            summary = if (ntfyToken.isBlank()) "Not stored" else "Stored on this device",
+                            onClick = { openTextEditor(SettingsDestination.NotificationsToken, ntfyToken) },
+                        )
+                    }
+                }
+            }
+
+            SettingsDestination.NotificationsTopicUrl -> {
+                SettingsTextEntryPage(
+                    modifier = Modifier.padding(innerPadding),
+                    value = editorText,
+                    onValueChange = { editorText = it },
+                    label = "Topic URL",
+                    supporting = "Example: https://ntfy.example.com/my-topic",
+                    isSaving = isUserSettingsSaving,
+                    onSave = {
+                        persistNotifications(nextTopicUrl = editorText.trim())
+                    },
                 )
             }
-            if (!isLoading && serverSettings == null && serverMeta == null) {
-                Text(
-                    text = "No server details loaded yet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+            SettingsDestination.NotificationsToken -> {
+                SettingsTextEntryPage(
+                    modifier = Modifier.padding(innerPadding),
+                    value = editorText,
+                    onValueChange = { editorText = it },
+                    label = "Token",
+                    supporting = "Leave empty to clear the saved token.",
+                    isPassword = true,
+                    isSaving = isUserSettingsSaving,
+                    onSave = {
+                        persistNotifications(nextToken = editorText.trim())
+                    },
                 )
             }
-            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun SettingsTextEntryPage(
+    modifier: Modifier = Modifier,
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    supporting: String,
+    isPassword: Boolean = false,
+    isSaving: Boolean = false,
+    onSave: () -> Unit,
+) {
+    SettingsPageContent(modifier = modifier) {
+        Text(
+            text = supporting,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        AppTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = label,
+            isPassword = isPassword,
+        )
+        Button(
+            onClick = onSave,
+            enabled = !isSaving,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(if (isSaving) "Saving..." else "Save")
         }
     }
 }
@@ -10583,6 +10809,17 @@ private fun SettingsNavigationRow(
         summary = summary,
         supporting = supporting,
         enabled = enabled,
+        trailing = {
+            Text(
+                text = "›",
+                style = MaterialTheme.typography.titleLarge,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.outline
+                },
+            )
+        },
         onClick = onClick,
     )
 }
@@ -10607,47 +10844,81 @@ private fun SettingsActionRow(
 }
 
 @Composable
+private fun SettingsChoiceRow(
+    title: String,
+    summary: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    SettingsListRow(
+        title = title,
+        summary = summary,
+        enabled = enabled,
+        trailing = {
+            if (selected) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        },
+        onClick = onClick,
+    )
+}
+
+@Composable
 private fun SettingsListRow(
     title: String,
     summary: String,
     supporting: String? = null,
     enabled: Boolean = true,
     destructive: Boolean = false,
+    trailing: (@Composable (() -> Unit))? = null,
     onClick: () -> Unit,
 ) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            color = when {
-                !enabled -> MaterialTheme.colorScheme.onSurfaceVariant
-                destructive -> MaterialTheme.colorScheme.error
-                else -> MaterialTheme.colorScheme.onSurface
-            },
-            fontWeight = FontWeight.Medium,
-        )
-        Text(
-            text = summary.ifBlank { "Not set" },
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (enabled) {
-                MaterialTheme.colorScheme.onSurface
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
-        supporting?.takeIf(String::isNotBlank)?.let { supportingText ->
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             Text(
-                text = supportingText,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = when {
+                    !enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+                    destructive -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurface
+                },
+                fontWeight = FontWeight.Medium,
             )
+            Text(
+                text = summary.ifBlank { "Not set" },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+            supporting?.takeIf(String::isNotBlank)?.let { supportingText ->
+                Text(
+                    text = supportingText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
+        trailing?.invoke()
     }
     HorizontalDivider(
         modifier = Modifier.padding(horizontal = 16.dp),
@@ -10915,6 +11186,28 @@ private fun displayUploadPlacement(value: String): String {
         "same-folder" -> "Same folder"
         else -> value.ifBlank { "Unknown" }
     }
+}
+
+private fun compactSettingsUrlSummary(value: String): String {
+    val trimmedValue = value.trim()
+    if (trimmedValue.isBlank()) {
+        return "Not configured"
+    }
+    return runCatching {
+        val normalizedValue = if (trimmedValue.contains("://")) {
+            trimmedValue
+        } else {
+            "https://$trimmedValue"
+        }
+        val uri = java.net.URI(normalizedValue)
+        buildString {
+            append(uri.host ?: trimmedValue)
+            if (uri.port != -1) {
+                append(':')
+                append(uri.port)
+            }
+        }.ifBlank { trimmedValue }
+    }.getOrDefault(trimmedValue)
 }
 
 @Composable
