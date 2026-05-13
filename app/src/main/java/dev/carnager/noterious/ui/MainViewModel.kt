@@ -147,7 +147,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _uiState.value
         if (state.settings.serverUrl.isBlank()) return
         if (!canAttemptBackgroundSync(state.settings)) return
-        if (state.pages.isEmpty() && state.folders.isEmpty()) {
+        if (state.pages.isEmpty() || state.folders.isEmpty()) {
             refresh(trigger = trigger)
         }
         if (state.vaults.isEmpty()) {

@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -83,6 +84,9 @@ fun MarkdownContent(
     onLinkClick: ((String) -> Unit)? = null,
     onTextClick: (() -> Unit)? = null,
     onImageClick: ((MarkdownImageTarget) -> Unit)? = null,
+    onTaskToggle: ((lineIndex: Int, checked: Boolean) -> Unit)? = null,
+    onTaskDueDateClick: ((lineIndex: Int, currentDue: String?) -> Unit)? = null,
+    onTaskReminderClick: ((lineIndex: Int, currentRemind: String?) -> Unit)? = null,
 ) {
     val effectiveLinkDefinitions = remember(markdown, linkDefinitions) {
         linkDefinitions ?: extractMarkdownReferenceDefinitions(stripFrontmatter(markdown))
@@ -101,7 +105,15 @@ fun MarkdownContent(
                 is MarkdownBlock.Paragraph -> MarkdownParagraph(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
                 is MarkdownBlock.BulletItem -> MarkdownBulletItem(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
                 is MarkdownBlock.NumberedItem -> MarkdownNumberedItem(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
-                is MarkdownBlock.TaskItem -> MarkdownTaskItem(block, effectiveLinkDefinitions, onLinkClick, onTextClick)
+                is MarkdownBlock.TaskItem -> MarkdownTaskItem(
+                    block = block,
+                    linkDefinitions = effectiveLinkDefinitions,
+                    onLinkClick = onLinkClick,
+                    onTextClick = onTextClick,
+                    onToggle = onTaskToggle,
+                    onDueDateClick = onTaskDueDateClick,
+                    onReminderClick = onTaskReminderClick,
+                )
                 is MarkdownBlock.BlockQuote -> MarkdownBlockQuote(
                     block = block,
                     currentPagePath = currentPagePath,
@@ -256,34 +268,96 @@ private fun MarkdownNumberedItem(
     }
 }
 
+private val taskBracketFieldPattern = Regex("\\[(due|remind|who|click|completed):\\s*[^\\]]*\\]", RegexOption.IGNORE_CASE)
+private val taskInlineFieldPattern = Regex("\\b(due|remind|who|click)::\\s*.*?(?=(\\s+\\b(due|remind|who|click)::)|$)", RegexOption.IGNORE_CASE)
+private val taskRemindTagPattern = Regex("(^|\\s)#remind\\b", RegexOption.IGNORE_CASE)
+
+private fun stripTaskFields(text: String): String {
+    return text
+        .replace(taskBracketFieldPattern, " ")
+        .replace(taskInlineFieldPattern, " ")
+        .replace(taskRemindTagPattern, " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
+private fun extractTaskField(text: String, field: String): String? {
+    val bracketMatch = Regex("\\[$field:\\s*([^\\]]*)\\]", RegexOption.IGNORE_CASE).find(text)
+    if (bracketMatch != null) return bracketMatch.groupValues[1].trim().takeIf(String::isNotBlank)
+    val inlineMatch = Regex("\\b$field::\\s*(\\S+)", RegexOption.IGNORE_CASE).find(text)
+    return inlineMatch?.groupValues?.get(1)?.trim()?.takeIf(String::isNotBlank)
+}
+
 @Composable
 private fun MarkdownTaskItem(
     block: MarkdownBlock.TaskItem,
     linkDefinitions: Map<String, String>,
     onLinkClick: ((String) -> Unit)?,
     onTextClick: (() -> Unit)?,
+    onToggle: ((lineIndex: Int, checked: Boolean) -> Unit)? = null,
+    onDueDateClick: ((lineIndex: Int, currentDue: String?) -> Unit)? = null,
+    onReminderClick: ((lineIndex: Int, currentRemind: String?) -> Unit)? = null,
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
-    Row(
+    val displayText = remember(block.text) { stripTaskFields(block.text) }
+    val dueDate = remember(block.text) { extractTaskField(block.text, "due") }
+    val reminder = remember(block.text) { extractTaskField(block.text, "remind") }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = markdownListStartPadding(block.indent)),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.Top,
     ) {
-        androidx.compose.material3.Icon(
-            if (block.checked) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-            contentDescription = null,
-            tint = if (block.checked) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline,
-        )
-        MarkdownText(
-            text = parseInlineMarkdown(block.text, linkColor, linkDefinitions),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f),
-            onLinkClick = onLinkClick,
-            onTextClick = onTextClick,
-        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                if (block.checked) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                contentDescription = if (block.checked) "Done" else "Todo",
+                tint = if (block.checked) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline,
+                modifier = if (onToggle != null) {
+                    Modifier.clickable { onToggle(block.lineIndex, !block.checked) }
+                } else {
+                    Modifier
+                },
+            )
+            MarkdownText(
+                text = parseInlineMarkdown(
+                    if (block.checked) "~~$displayText~~" else displayText,
+                    linkColor,
+                    linkDefinitions,
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (block.checked) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                modifier = Modifier.weight(1f),
+                onLinkClick = onLinkClick,
+                onTextClick = onTextClick,
+            )
+        }
+        if (dueDate != null || reminder != null) {
+            Row(
+                modifier = Modifier.padding(start = 32.dp, top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (dueDate != null) {
+                    AssistChip(
+                        onClick = { onDueDateClick?.invoke(block.lineIndex, dueDate) },
+                        label = { Text("Due $dueDate", style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+                if (reminder != null) {
+                    AssistChip(
+                        onClick = { onReminderClick?.invoke(block.lineIndex, reminder) },
+                        label = { Text("\u23F0 $reminder", style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -861,7 +935,7 @@ private sealed interface MarkdownBlock {
     data class Paragraph(val text: String) : MarkdownBlock
     data class BulletItem(val text: String, val indent: String = "") : MarkdownBlock
     data class NumberedItem(val number: Int, val text: String, val indent: String = "") : MarkdownBlock
-    data class TaskItem(val checked: Boolean, val text: String, val indent: String = "") : MarkdownBlock
+    data class TaskItem(val checked: Boolean, val text: String, val indent: String = "", val lineIndex: Int = 0) : MarkdownBlock
     data class BlockQuote(val text: String) : MarkdownBlock
     data class CodeFence(val text: String, val language: String = "") : MarkdownBlock
     data class Table(val headers: List<String>, val rows: List<List<String>>) : MarkdownBlock
@@ -1094,6 +1168,7 @@ private fun parseMarkdownBlocks(markdown: String, hideQueryFences: Boolean): Lis
                 checked = task.checked,
                 text = task.text,
                 indent = task.indent,
+                lineIndex = index + 1,
             )
             index += 1
             continue
