@@ -55,11 +55,13 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.Event
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
@@ -93,6 +95,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -577,6 +580,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clickable { openScopePicker() }
                                 .padding(vertical = 4.dp),
                         ) {
                             Text("Noterious")
@@ -679,6 +683,7 @@ fun NoteriousApp(viewModel: MainViewModel) {
                     Tab.Tasks -> TasksScreen(
                         tasks = uiState.tasks,
                         scopePrefix = uiState.settings.scopePrefix,
+                        quickTaskPage = uiState.settings.quickTaskPage,
                         filterText = tasksFilterText,
                         taskFilter = runCatching { TaskListFilter.valueOf(tasksQuickFilterName) }.getOrDefault(TaskListFilter.All),
                         onFilterTextChange = { tasksFilterText = it },
@@ -697,6 +702,9 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         },
                         onDeleteTask = { taskRef, onResult ->
                             viewModel.deleteTask(taskRef, onResult)
+                        },
+                        onCreateQuickTask = { text, due, remind, onResult ->
+                            viewModel.appendQuickTask(text, due, remind, onResult)
                         },
                     )
                     Tab.Search -> SearchScreen(
@@ -751,8 +759,8 @@ fun NoteriousApp(viewModel: MainViewModel) {
                         isThemesLoading = uiState.isThemesLoading,
                         isThemeBusy = uiState.isThemeBusy,
                         isUserSettingsSaving = uiState.isUserSettingsSaving,
-                        onSave = { url, scope, user, pass, token, startupTab ->
-                            viewModel.saveSettings(url, scope, user, pass, token, startupTab)
+                        onSave = { url, scope, user, pass, token, tab, taskPage ->
+                            viewModel.saveSettings(url, scope, user, pass, token, tab, taskPage)
                         },
                         onRefreshVaults = {
                             viewModel.fetchVaults()
@@ -2271,37 +2279,6 @@ private fun PageViewerScreen(
                         .verticalScroll(rememberScrollState())
                         .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 32.dp),
                 ) {
-                    Text(
-                        text = displayPath,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-                    AssistChip(
-                        onClick = { openFrontmatterSheet() },
-                        enabled = !isDirty && !isPatchingFrontmatter,
-                        label = {
-                            Text(
-                                if (visibleFrontmatterEntries.isEmpty()) {
-                                    "Properties"
-                                } else {
-                                    "Properties (${visibleFrontmatterEntries.size})"
-                                },
-                            )
-                        },
-                    )
-
-                    if (isDirty) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "Save or revert the note before editing properties.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    Spacer(Modifier.height(12.dp))
                     MarkdownContent(
                         markdown = renderedMarkdown,
                         currentPagePath = pagePath,
@@ -3470,78 +3447,76 @@ private fun TaskScheduleSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
     ) {
         Column(
             modifier = Modifier
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-                .imePadding(),
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = if (lineNumber != null) "Task schedule · line $lineNumber" else "Task schedule",
+                text = stripTaskInlineFields(task.text).ifBlank { "Task" },
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Text(
-                text = task.text.ifBlank { "Task" },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            TaskScheduleField(
-                label = "Due date",
-                value = dueValue.takeIf(String::isNotBlank)?.let(::formatTaskDueValue) ?: "None",
-                onSet = { openDatePicker = true },
-                onClear = if (dueValue.isNotBlank()) {
-                    { dueValue = "" }
-                } else {
-                    null
-                },
-                enabled = !isSaving,
-            )
-            TaskScheduleField(
-                label = "Reminder",
-                value = remindValue.takeIf(String::isNotBlank)?.let(::formatTaskReminderValue) ?: "None",
-                onSet = { openTimePicker = true },
-                onClear = if (remindValue.isNotBlank()) {
-                    { remindValue = "" }
-                } else {
-                    null
-                },
-                enabled = !isSaving,
-            )
-            Text(
-                text = if (dueValue.isBlank()) {
-                    "Reminder uses time only and becomes useful once the task has a due date."
-                } else {
-                    "Reminder matches the due date and stores only the time, like the web client."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                TextButton(onClick = onDismiss, enabled = !isSaving) {
-                    Text("Cancel")
-                }
-                Button(
-                    onClick = { onSave(dueValue, remindValue) },
+                AssistChip(
+                    onClick = { openDatePicker = true },
                     enabled = !isSaving,
-                ) {
-                    if (isSaving) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    } else {
-                        Text("Done")
-                    }
+                    label = {
+                        Text(dueValue.takeIf(String::isNotBlank)?.let(::formatTaskDueValue) ?: "Due date")
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Event, contentDescription = null, modifier = Modifier.size(18.dp))
+                    },
+                    trailingIcon = if (dueValue.isNotBlank()) {
+                        {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Clear",
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable { dueValue = "" },
+                            )
+                        }
+                    } else null,
+                )
+                AssistChip(
+                    onClick = { openTimePicker = true },
+                    enabled = !isSaving,
+                    label = {
+                        Text(remindValue.takeIf(String::isNotBlank)?.let(::formatTaskReminderValue) ?: "Reminder")
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Schedule, contentDescription = null, modifier = Modifier.size(18.dp))
+                    },
+                    trailingIcon = if (remindValue.isNotBlank()) {
+                        {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Clear",
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable { remindValue = "" },
+                            )
+                        }
+                    } else null,
+                )
+            }
+            Button(
+                onClick = { onSave(dueValue, remindValue) },
+                enabled = !isSaving,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (isSaving) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text("Save")
                 }
             }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }
@@ -6695,10 +6670,12 @@ private fun entriesForFolder(tree: FileTree, folder: String): List<FileEntry> {
 
 // ─── Tasks Screen ───────────────────────────────────────────────────────
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TasksScreen(
     tasks: List<TaskItem>,
     scopePrefix: String,
+    quickTaskPage: String,
     filterText: String,
     taskFilter: TaskListFilter,
     onFilterTextChange: (String) -> Unit,
@@ -6706,6 +6683,7 @@ private fun TasksScreen(
     onOpenPage: (String) -> Unit,
     onPatchTask: (taskRef: String, text: String?, state: String?, due: String?, remind: String?, click: String?, onResult: (Boolean) -> Unit) -> Unit,
     onDeleteTask: (taskRef: String, onResult: (Boolean) -> Unit) -> Unit,
+    onCreateQuickTask: (text: String, due: String?, remind: String?, onResult: (Boolean) -> Unit) -> Unit,
 ) {
     val today = LocalDate.now()
     val filteredTasks = remember(tasks, filterText, taskFilter, today) {
@@ -6733,97 +6711,287 @@ private fun TasksScreen(
         filteredTasks.groupBy { it.page }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = filterText,
-            onValueChange = onFilterTextChange,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            placeholder = { Text("Filter tasks...") },
-            singleLine = true,
-            trailingIcon = {
-                if (filterText.isNotEmpty()) {
-                    IconButton(onClick = { onFilterTextChange("") }) {
-                        Icon(Icons.Default.Close, contentDescription = "Clear")
+    var showQuickTaskSheet by remember { mutableStateOf(false) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            OutlinedTextField(
+                value = filterText,
+                onValueChange = onFilterTextChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                placeholder = { Text("Filter ${filteredTasks.size} tasks...") },
+                singleLine = true,
+                trailingIcon = {
+                    if (filterText.isNotEmpty()) {
+                        IconButton(onClick = { onFilterTextChange("") }) {
+                            Icon(Icons.Default.Close, contentDescription = "Clear")
+                        }
                     }
-                }
-            },
-        )
+                },
+            )
 
-        FlowRow(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TaskListFilter.entries.forEach { candidate ->
-                FilterChip(
-                    selected = taskFilter == candidate,
-                    onClick = { onTaskFilterChange(candidate) },
-                    label = { Text(candidate.label) },
-                )
-            }
-        }
-
-        Text(
-            "${filteredTasks.size} Tasks",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-        )
-
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                top = 4.dp,
-                end = 16.dp,
-                bottom = screenContentBottomPadding,
-            ),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            groupedTasks.forEach { (page, pageTasks) ->
-                item(key = "header:$page") {
-                    Text(
-                        text = displayPagePath(page, scopePrefix).ifBlank { page },
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
-                    )
-                }
-                items(pageTasks, key = { it.ref }) { task ->
-                    TaskResultCard(
-                        task = task.toTaskResultCardModel(
-                            scopePrefix = scopePrefix,
-                            includePageInSupportingText = false,
-                        ),
-                        scopePrefix = scopePrefix,
-                        onOpenPage = onOpenPage,
-                        onPatchTask = onPatchTask,
-                        onDeleteTask = onDeleteTask,
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = 16.dp, vertical = 2.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TaskListFilter.entries.forEach { candidate ->
+                    FilterChip(
+                        selected = taskFilter == candidate,
+                        onClick = { onTaskFilterChange(candidate) },
+                        label = { Text(candidate.label) },
                     )
                 }
             }
 
-            if (groupedTasks.isEmpty()) {
-                item("empty") {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 32.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = 16.dp,
+                    top = 4.dp,
+                    end = 16.dp,
+                    bottom = screenContentBottomPadding + 72.dp,
+                ),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                groupedTasks.forEach { (page, pageTasks) ->
+                    item(key = "header:$page") {
                         Text(
-                            "No tasks for this filter.",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = displayPagePath(page, scopePrefix).ifBlank { page },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
+                        )
+                    }
+                    items(pageTasks, key = { it.ref }) { task ->
+                        TaskResultCard(
+                            task = task.toTaskResultCardModel(
+                                scopePrefix = scopePrefix,
+                                includePageInSupportingText = false,
+                            ),
+                            scopePrefix = scopePrefix,
+                            onOpenPage = onOpenPage,
+                            onPatchTask = onPatchTask,
+                            onDeleteTask = onDeleteTask,
                         )
                     }
                 }
+
+                if (groupedTasks.isEmpty()) {
+                    item("empty") {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 32.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "No tasks for this filter.",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
             }
+        }
+
+        FloatingActionButton(
+            onClick = { showQuickTaskSheet = true },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = screenContentBottomPadding),
+        ) {
+            Icon(Icons.Default.Add, contentDescription = "New task")
+        }
+    }
+
+    if (showQuickTaskSheet) {
+        if (quickTaskPage.isBlank()) {
+            QuickTaskConfigPrompt(onDismiss = { showQuickTaskSheet = false })
+        } else {
+            QuickTaskSheet(
+                onDismiss = { showQuickTaskSheet = false },
+                onSave = { text, due, remind ->
+                    onCreateQuickTask(text, due, remind) { success ->
+                        if (success) showQuickTaskSheet = false
+                    }
+                },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QuickTaskConfigPrompt(onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                "Quick Task Page not configured",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                "Set a page name in Settings → Connection → Quick task page to enable quick task creation.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QuickTaskSheet(
+    onDismiss: () -> Unit,
+    onSave: (text: String, due: String?, remind: String?) -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var taskText by remember { mutableStateOf("") }
+    var dueDate by remember { mutableStateOf<String?>(null) }
+    var remindTime by remember { mutableStateOf<String?>(null) }
+    var isSaving by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var openDatePicker by remember { mutableStateOf(false) }
+    var openTimePicker by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                "New Task",
+                style = MaterialTheme.typography.titleMedium,
+            )
+
+            OutlinedTextField(
+                value = taskText,
+                onValueChange = { taskText = it },
+                label = { Text("Task") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = false,
+                maxLines = 3,
+            )
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AssistChip(
+                    onClick = { openDatePicker = true },
+                    label = {
+                        Text(dueDate ?: "Due date")
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Event,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    trailingIcon = if (dueDate != null) {
+                        {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Clear",
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable { dueDate = null },
+                            )
+                        }
+                    } else null,
+                )
+                AssistChip(
+                    onClick = { openTimePicker = true },
+                    label = {
+                        Text(remindTime ?: "Reminder")
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Schedule,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    trailingIcon = if (remindTime != null) {
+                        {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Clear",
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clickable { remindTime = null },
+                            )
+                        }
+                    } else null,
+                )
+            }
+
+            Button(
+                onClick = {
+                    isSaving = true
+                    onSave(taskText.trim(), dueDate, remindTime)
+                },
+                enabled = taskText.isNotBlank() && !isSaving,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (isSaving) "Saving..." else "Add Task")
+            }
+        }
+    }
+
+    if (openDatePicker) {
+        val now = java.util.Calendar.getInstance()
+        DisposableEffect(context) {
+            val dialog = DatePickerDialog(
+                context,
+                { _, year, month, day ->
+                    dueDate = "%04d-%02d-%02d".format(year, month + 1, day)
+                    openDatePicker = false
+                },
+                now.get(java.util.Calendar.YEAR),
+                now.get(java.util.Calendar.MONTH),
+                now.get(java.util.Calendar.DAY_OF_MONTH),
+            )
+            dialog.setOnDismissListener { openDatePicker = false }
+            dialog.show()
+            onDispose { dialog.dismiss() }
+        }
+    }
+
+    if (openTimePicker) {
+        val now = java.util.Calendar.getInstance()
+        val is24h = DateFormat.is24HourFormat(context)
+        DisposableEffect(context) {
+            val dialog = TimePickerDialog(
+                context,
+                { _, hour, minute ->
+                    remindTime = "%02d:%02d".format(hour, minute)
+                    openTimePicker = false
+                },
+                now.get(java.util.Calendar.HOUR_OF_DAY),
+                now.get(java.util.Calendar.MINUTE),
+                is24h,
+            )
+            dialog.setOnDismissListener { openTimePicker = false }
+            dialog.show()
+            onDispose { dialog.dismiss() }
         }
     }
 }
@@ -6852,13 +7020,19 @@ private fun SearchScreen(
         }
     }
 
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         OutlinedTextField(
             value = searchText,
             onValueChange = onSearchTextChange,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .focusRequester(focusRequester),
             placeholder = { Text("Search...") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
@@ -7270,6 +7444,7 @@ private fun SettingsPageContent(
     Column(
         modifier = modifier
             .fillMaxSize()
+            .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -7288,7 +7463,7 @@ private fun SettingsScreen(
     isThemesLoading: Boolean,
     isThemeBusy: Boolean,
     isUserSettingsSaving: Boolean,
-    onSave: (String, String, String, String, String, String) -> Unit,
+    onSave: (serverUrl: String, scopePrefix: String, username: String, password: String, bearerToken: String, startupTab: String, quickTaskPage: String) -> Unit,
     onRefreshVaults: () -> Unit,
     onRefreshThemes: () -> Unit,
     onSaveThemeSelection: (String) -> Unit,
@@ -7304,6 +7479,9 @@ private fun SettingsScreen(
     var startupTab by rememberSaveable(settings.startupTab) {
         mutableStateOf(startupTabForValue(settings.startupTab).wireValue)
     }
+    var quickTaskPage by rememberSaveable(settings.quickTaskPage) {
+        mutableStateOf(settings.quickTaskPage)
+    }
     var ntfyTopicUrl by rememberSaveable(userSettings.notifications.ntfyTopicUrl) {
         mutableStateOf(userSettings.notifications.ntfyTopicUrl)
     }
@@ -7311,6 +7489,7 @@ private fun SettingsScreen(
         mutableStateOf(userSettings.notifications.ntfyToken)
     }
     var destinationName by rememberSaveable { mutableStateOf(SettingsDestination.Root.name) }
+    var showSavedConfirmation by remember { mutableStateOf(false) }
     val destination = runCatching { SettingsDestination.valueOf(destinationName) }
         .getOrDefault(SettingsDestination.Root)
     val selectedThemeId = settings.themeId.trim().ifBlank { "system" }
@@ -7362,6 +7541,7 @@ private fun SettingsScreen(
         nextPassword: String = password,
         nextBearerToken: String = bearerToken,
         nextStartupTab: String = startupTab,
+        nextQuickTaskPage: String = quickTaskPage,
     ) {
         serverUrl = nextServerUrl
         scopePrefix = nextScopePrefix
@@ -7369,6 +7549,7 @@ private fun SettingsScreen(
         password = nextPassword
         bearerToken = nextBearerToken
         startupTab = startupTabForValue(nextStartupTab).wireValue
+        quickTaskPage = nextQuickTaskPage
         onSave(
             serverUrl,
             scopePrefix,
@@ -7376,6 +7557,7 @@ private fun SettingsScreen(
             password,
             bearerToken,
             startupTab,
+            quickTaskPage,
         )
     }
 
@@ -7442,63 +7624,96 @@ private fun SettingsScreen(
             }
 
             SettingsDestination.Connection -> {
-                SettingsPageContent(modifier = Modifier.padding(innerPadding)) {
-                    OutlinedTextField(
-                        value = serverUrl,
-                        onValueChange = { serverUrl = it },
-                        label = { Text("Server URL") },
-                        supportingText = { Text("Example: https://notes.example.com") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it },
-                        label = { Text("Username") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = bearerToken,
-                        onValueChange = { bearerToken = it },
-                        label = { Text("Bearer token") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text(
-                        text = "Use either username/password or a bearer token.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    SettingsListSection {
-                        SettingsNavigationRow(
-                            title = "Default scope",
-                            summary = defaultScopeSummary,
-                            onClick = {
-                                onRefreshVaults()
-                                navigateTo(SettingsDestination.ConnectionDefaultScope)
-                            },
+                val hasConnectionChanges = serverUrl != settings.serverUrl ||
+                    username != settings.username ||
+                    password != settings.password ||
+                    bearerToken != settings.bearerToken ||
+                    startupTabForValue(startupTab).wireValue != settings.startupTab ||
+                    quickTaskPage != settings.quickTaskPage
+
+                Column(modifier = Modifier.padding(innerPadding)) {
+                    SettingsPageContent(modifier = Modifier.weight(1f)) {
+                        OutlinedTextField(
+                            value = serverUrl,
+                            onValueChange = { serverUrl = it },
+                            label = { Text("Server URL") },
+                            supportingText = { Text("Example: https://notes.example.com") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
                         )
-                        SettingsNavigationRow(
-                            title = "Startup page",
-                            summary = startupTabForValue(startupTab).label,
-                            onClick = { navigateTo(SettingsDestination.ConnectionStartupPage) },
+                        OutlinedTextField(
+                            value = username,
+                            onValueChange = { username = it },
+                            label = { Text("Username") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it },
+                            label = { Text("Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = bearerToken,
+                            onValueChange = { bearerToken = it },
+                            label = { Text("Bearer token") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            text = "Use either username/password or a bearer token.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        SettingsListSection {
+                            SettingsNavigationRow(
+                                title = "Default scope",
+                                summary = defaultScopeSummary,
+                                onClick = {
+                                    onRefreshVaults()
+                                    navigateTo(SettingsDestination.ConnectionDefaultScope)
+                                },
+                            )
+                            SettingsNavigationRow(
+                                title = "Startup page",
+                                summary = startupTabForValue(startupTab).label,
+                                onClick = { navigateTo(SettingsDestination.ConnectionStartupPage) },
+                            )
+                        }
+                        OutlinedTextField(
+                            value = quickTaskPage,
+                            onValueChange = { quickTaskPage = it },
+                            label = { Text("Quick task page") },
+                            supportingText = { Text("Page name to append tasks to (e.g. tasks)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
-                    Button(
-                        onClick = { persistConnection() },
-                        modifier = Modifier.fillMaxWidth(),
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = hasConnectionChanges || showSavedConfirmation,
                     ) {
-                        Text("Save connection")
+                        Button(
+                            onClick = {
+                                persistConnection()
+                                showSavedConfirmation = true
+                            },
+                            enabled = hasConnectionChanges,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                        ) {
+                            Text(if (showSavedConfirmation && !hasConnectionChanges) "Saved ✓" else "Save")
+                        }
+                        if (showSavedConfirmation) {
+                            LaunchedEffect(Unit) {
+                                kotlinx.coroutines.delay(2000)
+                                showSavedConfirmation = false
+                            }
+                        }
                     }
                 }
             }

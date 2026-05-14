@@ -424,6 +424,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         password: String,
         bearerToken: String,
         startupTab: String,
+        quickTaskPage: String = _uiState.value.settings.quickTaskPage,
     ) {
         viewModelScope.launch {
             templatePagesCacheKey = null
@@ -444,6 +445,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     password = password,
                     bearerToken = bearerToken,
                     startupTab = startupTab,
+                    quickTaskPage = quickTaskPage,
                     themeId = _uiState.value.settings.themeId,
                     hasCompletedSetup = _uiState.value.settings.hasCompletedSetup && serverUrl.isNotBlank(),
                     hasCompletedDefaultScopePrompt = when {
@@ -2629,6 +2631,82 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (error is CancellationException) return@onFailure
                 _uiState.update {
                     it.copy(error = error.message ?: "Task could not be deleted.")
+                }
+                onResult(false)
+            }
+        }
+    }
+
+    fun appendQuickTask(
+        text: String,
+        due: String? = null,
+        remind: String? = null,
+        onResult: (Boolean) -> Unit = {},
+    ) {
+        val settings = _uiState.value.settings
+        val pageName = applyScopePrefixToPagePath(settings.quickTaskPage, settings.scopePrefix)
+        if (settings.serverUrl.isBlank() || pageName.isBlank()) {
+            onResult(false)
+            return
+        }
+
+        viewModelScope.launch {
+            runCatching {
+                val existing = runCatching {
+                    repository.fetchPageDetail(
+                        url = settings.serverUrl,
+                        pagePath = pageName,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }.getOrNull()
+
+                val taskLine = buildString {
+                    append("- [ ] ")
+                    append(text)
+                    if (!due.isNullOrBlank()) append(" [due: $due]")
+                    if (!remind.isNullOrBlank()) append(" [remind: $remind]")
+                }
+
+                val currentContent = existing?.rawMarkdown.orEmpty()
+                val newContent = if (currentContent.isBlank()) {
+                    "$taskLine\n"
+                } else {
+                    "${currentContent.trimEnd()}\n$taskLine\n"
+                }
+
+                if (existing != null) {
+                    repository.savePage(
+                        url = settings.serverUrl,
+                        pagePath = pageName,
+                        rawMarkdown = newContent,
+                        baseRawMarkdown = currentContent,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                } else {
+                    repository.createPage(
+                        url = settings.serverUrl,
+                        pagePath = pageName,
+                        rawMarkdown = newContent,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }
+            }.onSuccess {
+                lastSaveTimestamp = System.currentTimeMillis()
+                refresh(trigger = "quick-task")
+                onResult(true)
+            }.onFailure { error ->
+                if (error is CancellationException) return@onFailure
+                _uiState.update {
+                    it.copy(error = error.message ?: "Task could not be created.")
                 }
                 onResult(false)
             }
