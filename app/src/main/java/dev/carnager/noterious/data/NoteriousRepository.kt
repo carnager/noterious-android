@@ -48,6 +48,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 
 class NoteriousRepository {
+    private val authLock = Any()
     private val json = Json {
         ignoreUnknownKeys = true
         explicitNulls = false
@@ -1232,21 +1233,23 @@ class NoteriousRepository {
             return
         }
 
-        val currentSession = runCatching {
-            loadSession(baseUrl)
-        }.getOrNull()
-        if (currentSession?.authenticated == true) {
-            return
-        }
-        if (currentSession?.setupRequired == true) {
-            throw IllegalStateException("Server requires initial account setup.")
-        }
+        synchronized(authLock) {
+            val currentSession = runCatching {
+                loadSession(baseUrl)
+            }.getOrNull()
+            if (currentSession?.authenticated == true) {
+                return
+            }
+            if (currentSession?.setupRequired == true) {
+                throw IllegalStateException("Server requires initial account setup.")
+            }
 
-        runCatching {
-            login(baseUrl, username, password)
-        }.onFailure { error ->
-            if (!isSkippableLoginError(error)) {
-                throw error
+            runCatching {
+                login(baseUrl, username, password)
+            }.onFailure { error ->
+                if (!isSkippableLoginError(error)) {
+                    throw error
+                }
             }
         }
     }

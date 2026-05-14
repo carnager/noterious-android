@@ -2244,14 +2244,14 @@ private fun PageViewerScreen(
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     BasicTextField(
                         value = rawEditorValue,
-                        onValueChange = {
-                            rawEditorValue = it
-                            draftMarkdown = it.text
+                        onValueChange = { newValue ->
+                            val continued = applyLineContinuation(rawEditorValue, newValue) ?: newValue
+                            rawEditorValue = continued
+                            draftMarkdown = continued.text
                         },
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f)
-                            .verticalScroll(rememberScrollState())
                             .padding(horizontal = 16.dp, vertical = 12.dp)
                             .focusRequester(focusRequester),
                         textStyle = MaterialTheme.typography.bodyMedium.copy(

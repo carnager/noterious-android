@@ -46,6 +46,58 @@ internal fun currentLineRange(text: String, cursorPosition: Int): LineRange {
 
 internal fun String.lineContent(range: LineRange): String = substring(range.start, range.endExclusive)
 
+private val listPrefixPattern = Regex("""^(\s*(?:[-*]\s+(?:\[[ x]]\s+)?|\d+\.\s+))""")
+private val numberedPrefixPattern = Regex("""^(\s*)(\d+)(\.\s+)""")
+
+/**
+ * If a newline was just typed, detect the previous line's list prefix and
+ * continue it on the new line. If the previous line was *only* a prefix
+ * (empty list item), remove it instead of continuing.
+ *
+ * Returns null if no continuation applies (caller should use value as-is).
+ */
+internal fun applyLineContinuation(old: TextFieldValue, new: TextFieldValue): TextFieldValue? {
+    val cursor = new.selection.start
+    if (!new.selection.collapsed || cursor < 2) return null
+    if (new.text.length <= old.text.length) return null
+    // Only act when a newline appears right before the cursor
+    if (new.text[cursor - 1] != '\n') return null
+    // If the line before the cursor was already blank, don't continue a list
+    if (new.text[cursor - 2] == '\n') return null
+
+    val prevLineRange = currentLineRange(new.text, cursor - 2)
+    val prevLine = new.text.lineContent(prevLineRange)
+
+    val match = listPrefixPattern.find(prevLine) ?: return null
+    val prefix = match.value
+
+    // If the previous line is just the prefix (empty item), remove the prefix
+    // and the newline the user just typed — leave cursor on blank line between
+    // the line above and what follows, so the blank line itself is the "previous
+    // line" for any subsequent Enter (no list prefix → no re-trigger).
+    if (prevLine.trimEnd() == prefix.trimEnd()) {
+        // Remove the prefix content but keep the newline leading into this line
+        // so the result is: ...\n\n<rest>  with cursor on the empty line.
+        val cleaned = new.text.substring(0, prevLineRange.start) +
+            new.text.substring(cursor)
+        return TextFieldValue(cleaned, TextRange(prevLineRange.start))
+    }
+
+    // Increment number for numbered lists
+    val numberedMatch = numberedPrefixPattern.find(prefix)
+    val continuation = if (numberedMatch != null) {
+        val indent = numberedMatch.groupValues[1]
+        val num = numberedMatch.groupValues[2].toIntOrNull() ?: 1
+        val suffix = numberedMatch.groupValues[3]
+        "$indent${num + 1}$suffix"
+    } else {
+        prefix
+    }
+
+    val newText = new.text.substring(0, cursor) + continuation + new.text.substring(cursor)
+    return TextFieldValue(newText, TextRange(cursor + continuation.length))
+}
+
 @Composable
 internal fun MarkdownToolbar(
     value: TextFieldValue,

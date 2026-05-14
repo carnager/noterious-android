@@ -30,6 +30,8 @@ import dev.carnager.noterious.model.VaultRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -96,6 +98,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var settingsLoaded = false
     private var appInForeground = false
+    private var hasCompletedInitialSync = false
     private var eventStreamJob: Job? = null
     private var pendingLiveRefreshJob: Job? = null
     private var activeEventStreamKey: String? = null
@@ -107,6 +110,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var settingsDetailsCacheKey: String? = null
     private val openPageBackStack = ArrayDeque<String>()
     private var pendingDeepLinkPagePath: String? = null
+    private var lastSaveTimestamp = 0L
 
     init {
         viewModelScope.launch {
@@ -147,8 +151,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = _uiState.value
         if (state.settings.serverUrl.isBlank()) return
         if (!canAttemptBackgroundSync(state.settings)) return
-        if (state.pages.isEmpty() || state.folders.isEmpty()) {
-            refresh(trigger = trigger)
+        if (!hasCompletedInitialSync || state.pages.isEmpty() || state.folders.isEmpty()) {
+            if (_uiState.value.isLoading && !hasCompletedInitialSync) {
+                viewModelScope.launch {
+                    uiState.first { !it.isLoading }
+                    if (!hasCompletedInitialSync && appInForeground) {
+                        refresh(trigger = "initial-retry")
+                    }
+                }
+            } else {
+                refresh(trigger = trigger)
+            }
         }
         if (state.vaults.isEmpty()) {
             fetchVaults()
@@ -180,6 +193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = null,
                     )
                 }
+                hasCompletedInitialSync = true
                 if (!settings.hasCompletedSetup) {
                     val completedSettings = settings.copy(hasCompletedSetup = true)
                     settingsRepository.save(completedSettings)
@@ -2285,6 +2299,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         today = result.today ?: current.today,
                     )
                 }
+                lastSaveTimestamp = System.currentTimeMillis()
                 onResult(true)
             }.onFailure { error ->
                 if (error is CancellationException) return@onFailure
@@ -2569,6 +2584,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     click = click,
                 )
             }.onSuccess {
+                lastSaveTimestamp = System.currentTimeMillis()
                 refresh(trigger = "task-change")
                 activeSearchQuery?.let(::search)
                 onResult(true)
@@ -2795,7 +2811,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun reloadOpenPageIfNeeded() {
         val pagePath = _uiState.value.openPagePath ?: return
-        openPage(pagePath, addToBackStack = false)
+        if (_uiState.value.isPageSaving) return
+        // Skip reload if we just saved — the SSE event is our own echo
+        if (System.currentTimeMillis() - lastSaveTimestamp < 3_000) return
+        reloadOpenPageSeamlessly(pagePath)
+    }
+
+    private fun reloadOpenPageSeamlessly(pagePath: String) {
+        val settings = _uiState.value.settings
+        if (settings.serverUrl.isBlank()) return
+        openPageJob?.cancel()
+        openPageJob = viewModelScope.launch {
+            runCatching {
+                val detail = repository.fetchPageDetail(
+                    url = settings.serverUrl,
+                    pagePath = pagePath,
+                    scopePrefix = settings.scopePrefix,
+                    bearerToken = settings.bearerToken,
+                    username = settings.username,
+                    password = settings.password,
+                )
+                val derived = runCatching {
+                    repository.fetchDerivedPage(
+                        url = settings.serverUrl,
+                        pagePath = pagePath,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }.getOrNull()
+                OpenPageLoadResult(
+                    rawMarkdown = detail.rawMarkdown,
+                    frontmatter = detail.frontmatter,
+                    pageTasks = detail.tasks,
+                    derived = derived,
+                )
+            }.onSuccess { result ->
+                _uiState.update { current ->
+                    if (current.openPagePath == pagePath) {
+                        current.copy(
+                            openPageContent = result.rawMarkdown,
+                            openPageFrontmatter = result.frontmatter,
+                            openPageTasks = result.pageTasks,
+                            openPageDerived = result.derived,
+                        )
+                    } else current
+                }
+            }
+        }
     }
 
     private fun consumePendingDeepLinkIfPossible() {
@@ -2895,40 +2959,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ).joinToString("\u0000")
     }
 
-    private suspend fun fetchCollectionsSnapshot(settings: AppSettings): CollectionsRefreshResult {
-        val pages = runCatching {
-            repository.fetchPages(
-                url = settings.serverUrl,
-                scopePrefix = settings.scopePrefix,
-                bearerToken = settings.bearerToken,
-                username = settings.username,
-                password = settings.password,
+    private suspend fun <T> fetchWithRetry(label: String, maxAttempts: Int = 3, block: suspend () -> T): T? {
+        repeat(maxAttempts) { attempt ->
+            try {
+                return block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("Noterious", "fetch $label failed (attempt ${attempt + 1}/$maxAttempts)", e)
+                if (attempt < maxAttempts - 1) delay(1000L * (attempt + 1))
+            }
+        }
+        return null
+    }
+
+    private suspend fun fetchCollectionsSnapshot(settings: AppSettings): CollectionsRefreshResult = coroutineScope {
+            val pagesDeferred = async {
+                fetchWithRetry("pages") {
+                    repository.fetchPages(
+                        url = settings.serverUrl,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }
+            }
+            val foldersDeferred = async {
+                fetchWithRetry("folders") {
+                    repository.fetchFolders(
+                        url = settings.serverUrl,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }
+            }
+            val tasksDeferred = async {
+                fetchWithRetry("tasks") {
+                    repository.fetchTasks(
+                        url = settings.serverUrl,
+                        scopePrefix = settings.scopePrefix,
+                        bearerToken = settings.bearerToken,
+                        username = settings.username,
+                        password = settings.password,
+                    )
+                }
+            }
+            val pages = pagesDeferred.await()
+            val folders = foldersDeferred.await()
+            val tasks = tasksDeferred.await()
+            CollectionsRefreshResult(
+                pages = pages,
+                folders = folders,
+                tasks = tasks,
+                today = tasks?.let(repository::buildTodaySnapshot),
             )
-        }.getOrNull()
-        val folders = runCatching {
-            repository.fetchFolders(
-                url = settings.serverUrl,
-                scopePrefix = settings.scopePrefix,
-                bearerToken = settings.bearerToken,
-                username = settings.username,
-                password = settings.password,
-            )
-        }.getOrNull()
-        val tasks = runCatching {
-            repository.fetchTasks(
-                url = settings.serverUrl,
-                scopePrefix = settings.scopePrefix,
-                bearerToken = settings.bearerToken,
-                username = settings.username,
-                password = settings.password,
-            )
-        }.getOrNull()
-        return CollectionsRefreshResult(
-            pages = pages,
-            folders = folders,
-            tasks = tasks,
-            today = tasks?.let(repository::buildTodaySnapshot),
-        )
     }
 
     private suspend fun fetchCollectionsSnapshotForSetup(settings: AppSettings): CollectionsRefreshResult {
